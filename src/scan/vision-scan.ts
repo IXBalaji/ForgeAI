@@ -2,6 +2,10 @@ import { chromium } from "playwright";
 import type { RawFinding } from "./axe-scan.js";
 import type { Severity } from "../types/index.js";
 
+export interface VisionScanOptions {
+  storageState?: string | object;
+}
+
 const VISION_MODEL = process.env.CLAUDE_VISION_MODEL ?? "claude-opus-5";
 
 const FINDINGS_SCHEMA = {
@@ -32,7 +36,7 @@ const FINDINGS_SCHEMA = {
  * distinguishable. Screenshots only; no DOM access, so "selector" here is a
  * plain-language location, not a CSS selector.
  */
-export async function runVisionScan(baseUrl: string, routes: string[]): Promise<RawFinding[]> {
+export async function runVisionScan(baseUrl: string, routes: string[], options?: VisionScanOptions): Promise<RawFinding[]> {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.warn("[vision-scan] ANTHROPIC_API_KEY not set — skipping the vision pass.");
     return [];
@@ -44,7 +48,9 @@ export async function runVisionScan(baseUrl: string, routes: string[]): Promise<
   const findings: RawFinding[] = [];
   const browser = await chromium.launch();
   try {
-    const context = await browser.newContext();
+    const context = await browser.newContext(
+      options?.storageState ? { storageState: options.storageState as any } : undefined,
+    );
     const page = await context.newPage();
     for (const route of routes) {
       const pageUrl = new URL(route, baseUrl).toString();

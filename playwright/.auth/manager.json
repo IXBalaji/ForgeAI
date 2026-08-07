@@ -1,0 +1,14 @@
+{
+  "cookies": [],
+  "origins": [
+    {
+      "origin": "https://ashy-desert-0ae520400.7.azurestaticapps.net",
+      "localStorage": [
+        {
+          "name": "elms.auth",
+          "value": "{\"token\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbXNmeXRqZmEwMDBldm1wOGRxdmoxNzZnIiwicm9sZSI6Ik1BTkFHRVIiLCJpYXQiOjE3ODYxMTIxNTEsImV4cCI6MTc4NjE0MDk1MX0.k7G328nbHF2CdNBfYpMkMr7K72WpO227UJMIwk3bsws\",\"user\":{\"id\":\"cmsfytjfa000evmp8dqvj176g\",\"firstName\":\"Nora\",\"lastName\":\"Fenwick\",\"workEmail\":\"nora.fenwick@example.com\",\"role\":\"MANAGER\",\"photoUrl\":\"https://i.pravatar.cc/150?u=nora.fenwick\"}}"
+        }
+      ]
+    }
+  ]
+}

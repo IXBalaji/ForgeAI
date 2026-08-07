@@ -1,0 +1,14 @@
+{
+  "cookies": [],
+  "origins": [
+    {
+      "origin": "https://ashy-desert-0ae520400.7.azurestaticapps.net",
+      "localStorage": [
+        {
+          "name": "elms.auth",
+          "value": "{\"token\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbXNmeXRqOWIwMDBjdm1wOHMzcnZ5Yzh5Iiwicm9sZSI6IkFETUlOIiwiaWF0IjoxNzg2MTEyMTQ5LCJleHAiOjE3ODYxNDA5NDl9.dqNDMdCFnCzV_bG-5OV8tU_gOKtf66qaClayag62UJ0\",\"user\":{\"id\":\"cmsfytj9b000cvmp8s3rvyc8y\",\"firstName\":\"Balaji\",\"lastName\":\"Masal\",\"workEmail\":\"balajim@incubxperts.com\",\"role\":\"ADMIN\",\"photoUrl\":\"https://i.pravatar.cc/150?u=balaji.masal\"}}"
+        }
+      ]
+    }
+  ]
+}

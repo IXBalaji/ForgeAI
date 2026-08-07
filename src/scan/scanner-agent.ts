@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { chromium } from "playwright";
 import { db } from "../db/client.js";
 import { scanRuns, issues } from "../db/schema.js";
 import type { Severity } from "../types/index.js";
@@ -7,11 +8,22 @@ import { runLighthouseScan } from "./lighthouse-scan.js";
 import { runPa11yScan } from "./pa11y-scan.js";
 import { runVisionScan } from "./vision-scan.js";
 
+export interface AuthRole {
+  label: string;
+  credentials?: { email: string; password: string };
+  storageState?: string | object;
+  routes: string[];
+}
+
 export interface ScannerOptions {
   targetEnv: string;
   baseUrl: string;
   routes: string[];
   triggeredBy?: string;
+  auth?: {
+    loginUrl?: string;
+    roles?: AuthRole[];
+  };
 }
 
 export interface ScannerResult {
@@ -21,11 +33,65 @@ export interface ScannerResult {
   bySource: Record<RawFinding["source"], number>;
 }
 
+async function performLogin(
+  baseUrl: string,
+  loginUrl: string,
+  credentials: { email: string; password: string },
+): Promise<object> {
+  const browser = await chromium.launch();
+  try {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const fullLoginUrl = new URL(loginUrl, baseUrl).toString();
+    await page.goto(fullLoginUrl, { waitUntil: "networkidle" });
+    await page.getByLabel("Work email").fill(credentials.email);
+    await page.getByLabel("Password").fill(credentials.password);
+    await page.getByRole("button", { name: "Sign in" }).click();
+    await page.waitForSelector("h1", { timeout: 15000 });
+    return await context.storageState();
+  } finally {
+    await browser.close();
+  }
+}
+
+async function resolveStorageState(
+  baseUrl: string,
+  loginUrl: string | undefined,
+  role: AuthRole,
+): Promise<object | undefined> {
+  if (role.storageState) {
+    return typeof role.storageState === "string"
+      ? JSON.parse(role.storageState)
+      : role.storageState;
+  }
+  if (role.credentials && loginUrl) {
+    return performLogin(baseUrl, loginUrl, role.credentials);
+  }
+  return undefined;
+}
+
+function runAllSources(baseUrl: string, routes: string[], storageState?: object): Array<Promise<RawFinding[]>> {
+  const sourceRuns: Array<Promise<RawFinding[]>> = [
+    runAxeScan(baseUrl, routes, { storageState }),
+  ];
+  if (process.env.SCAN_LIGHTHOUSE !== "false") {
+    sourceRuns.push(runLighthouseScan(baseUrl, routes, { storageState }));
+  }
+  if (process.env.SCAN_PA11Y !== "false") {
+    sourceRuns.push(runPa11yScan(baseUrl, routes, { storageState }));
+  }
+  if (process.env.SCAN_VISION !== "false") {
+    sourceRuns.push(runVisionScan(baseUrl, routes, { storageState }));
+  }
+  return sourceRuns;
+}
+
 /**
  * Scanner agent — runs every configured scan source against the given routes,
  * merges and fingerprints the findings, and writes a ScanRun + Issue rows.
- * Idempotent: re-scanning updates an existing Issue's scan_run_id rather than
- * duplicating it (see the fingerprint unique index in db/schema.ts).
+ * Supports multi-role authentication: when auth.roles is provided, each role
+ * is logged in and its routes are scanned separately, with all findings
+ * merged and deduped by fingerprint.
  */
 export async function runScannerAgent(opts: ScannerOptions): Promise<ScannerResult> {
   const [{ id: scanRunId }] = await db
@@ -43,16 +109,22 @@ export async function runScannerAgent(opts: ScannerOptions): Promise<ScannerResu
     })
     .returning({ id: scanRuns.id });
 
-  // Each source is independent — one failing (e.g. Lighthouse choking on a
-  // route) doesn't abort the others. Findings across sources are merged and
-  // deduped by fingerprint below, so the same real issue caught by two tools
-  // still becomes one Issue row.
-  const sourceRuns: Array<Promise<RawFinding[]>> = [runAxeScan(opts.baseUrl, opts.routes)];
-  if (process.env.SCAN_LIGHTHOUSE !== "false") sourceRuns.push(runLighthouseScan(opts.baseUrl, opts.routes));
-  if (process.env.SCAN_PA11Y !== "false") sourceRuns.push(runPa11yScan(opts.baseUrl, opts.routes));
-  if (process.env.SCAN_VISION !== "false") sourceRuns.push(runVisionScan(opts.baseUrl, opts.routes));
+  const allSourceRuns: Array<Promise<RawFinding[]>> = [];
 
-  const settled = await Promise.allSettled(sourceRuns);
+  if (opts.routes.length > 0) {
+    allSourceRuns.push(...runAllSources(opts.baseUrl, opts.routes));
+  }
+
+  if (opts.auth?.roles) {
+    for (const role of opts.auth.roles) {
+      const storageState = await resolveStorageState(opts.baseUrl, opts.auth.loginUrl, role);
+      if (role.routes.length > 0) {
+        allSourceRuns.push(...runAllSources(opts.baseUrl, role.routes, storageState as object | undefined));
+      }
+    }
+  }
+
+  const settled = await Promise.allSettled(allSourceRuns);
   const allFindings: RawFinding[] = [];
   const bySource: Record<RawFinding["source"], number> = { axe: 0, lighthouse: 0, pa11y: 0, vision: 0 };
 
@@ -72,7 +144,7 @@ export async function runScannerAgent(opts: ScannerOptions): Promise<ScannerResu
 
   for (const finding of allFindings) {
     const fp = fingerprintFinding(finding);
-    if (seenFingerprints.has(fp)) continue; // same real issue caught by >1 source
+    if (seenFingerprints.has(fp)) continue;
     seenFingerprints.add(fp);
 
     await db

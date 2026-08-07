@@ -3,6 +3,8 @@ import { AxeBuilder } from "@axe-core/playwright";
 import { createHash } from "node:crypto";
 import type { Severity } from "../types/index.js";
 
+export const DEFAULT_AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "best-practice"] as const;
+
 /** One raw finding from any scan source, before fingerprinting/DB persistence. */
 export interface RawFinding {
   source: "axe" | "lighthouse" | "pa11y" | "vision";
@@ -11,6 +13,11 @@ export interface RawFinding {
   pageUrl: string;
   severity: Severity;
   screenshotUrl?: string | null;
+}
+
+export interface AxeScanOptions {
+  tags?: string[];
+  storageState?: string | object;
 }
 
 export function fingerprintFinding(f: Pick<RawFinding, "wcagRule" | "selector" | "pageUrl">): string {
@@ -24,20 +31,19 @@ export function fingerprintFinding(f: Pick<RawFinding, "wcagRule" | "selector" |
  * go through the Scanner's ScanRun-writing pipeline just to check a few
  * routes — see review/reviewer-agent.ts for why that mattered.
  */
-export async function runAxeScan(baseUrl: string, routes: string[]): Promise<RawFinding[]> {
+export async function runAxeScan(baseUrl: string, routes: string[], options?: AxeScanOptions): Promise<RawFinding[]> {
+  const tags = options?.tags ?? [...DEFAULT_AXE_TAGS];
   const findings: RawFinding[] = [];
   const browser = await chromium.launch();
   try {
-    // @axe-core/playwright's finishRun() step opens a second blank page
-    // internally to combine partial results — it needs an explicit
-    // browser.newContext() to do that, and throws if the page came from
-    // the browser.newPage() shorthand instead.
-    const context = await browser.newContext();
+    const context = await browser.newContext(
+      options?.storageState ? { storageState: options.storageState as any } : undefined,
+    );
     const page = await context.newPage();
     for (const route of routes) {
       const pageUrl = new URL(route, baseUrl).toString();
       await page.goto(pageUrl, { waitUntil: "networkidle" });
-      const results = await new AxeBuilder({ page }).analyze();
+      const results = await new AxeBuilder({ page }).withTags(tags).analyze();
 
       for (const violation of results.violations) {
         const severity = (violation.impact ?? "moderate") as Severity;

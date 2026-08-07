@@ -7,7 +7,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli/index.ts",
-    "scan": "tsx src/cli/index.ts scan",
+    "scan": "playwright test && node src/scan/scripts/generate-a11y-report.mjs && tsx src/cli/index.ts scan",
+    "scan:agent": "tsx src/cli/index.ts scan",
+    "scan:playwright": "playwright test && node src/scan/scripts/generate-a11y-report.mjs",
     "triage": "tsx src/cli/index.ts triage",
     "fix": "tsx src/cli/index.ts fix",
     "review": "tsx src/cli/index.ts review",
@@ -17,7 +19,10 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:a11y": "playwright test && npm run report:a11y",
+    "test:a11y:headed": "playwright test --headed --workers=1 && npm run report:a11y",
+    "report:a11y": "node src/scan/scripts/generate-a11y-report.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0",
@@ -40,6 +45,7 @@
     "zod": "^3.23.8"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/node": "^22.10.2",
     "@types/pg": "^8.11.10",
     "drizzle-kit": "^0.28.1",

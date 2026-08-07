@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { Command } from "commander";
-import { runScannerAgent } from "../scan/scanner-agent.js";
+import { runScannerAgent, type AuthRole } from "../scan/scanner-agent.js";
 import { runTriageAgent } from "../triage/triage-agent.js";
 import { runDeveloperAgent } from "../development/developer-agent.js";
 import { runReviewerAgent } from "../review/reviewer-agent.js";
@@ -24,17 +24,33 @@ program.hook("preAction", async () => {
   await initObservability();
 });
 
+function parseAuthRolesEnv(): AuthRole[] | undefined {
+  const raw = process.env.TARGET_AUTH_ROLES;
+  if (!raw) return undefined;
+  return raw.split(",").map((entry) => {
+    const [label, email, password, routesPart] = entry.split(":");
+    return {
+      label,
+      credentials: { email, password },
+      routes: routesPart ? routesPart.split(";") : [],
+    };
+  });
+}
+
 program
   .command("scan")
   .description("Run the Scanner agent against the target app, no ticket creation")
   .option("--env <env>", "target environment label", "adhoc")
   .action(async (opts) => {
+    const roles = parseAuthRolesEnv();
+    const loginUrl = process.env.TARGET_LOGIN_URL;
     const result = await withSpan("agent.scanner", () =>
       runScannerAgent({
         targetEnv: opts.env,
         baseUrl: process.env.TARGET_FRONTEND_URL ?? "http://localhost:5173",
         routes: (process.env.TARGET_SCAN_ROUTES ?? "/").split(","),
         triggeredBy: "cli",
+        auth: roles ? { loginUrl, roles } : undefined,
       }),
     );
     console.log(JSON.stringify(result, null, 2));
