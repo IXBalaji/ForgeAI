@@ -6,7 +6,7 @@
       "localStorage": [
         {
           "name": "elms.auth",
-          "value": "{\"token\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbXNmeXRqZmEwMDBldm1wOGRxdmoxNzZnIiwicm9sZSI6Ik1BTkFHRVIiLCJpYXQiOjE3ODYxMTIxNTEsImV4cCI6MTc4NjE0MDk1MX0.k7G328nbHF2CdNBfYpMkMr7K72WpO227UJMIwk3bsws\",\"user\":{\"id\":\"cmsfytjfa000evmp8dqvj176g\",\"firstName\":\"Nora\",\"lastName\":\"Fenwick\",\"workEmail\":\"nora.fenwick@example.com\",\"role\":\"MANAGER\",\"photoUrl\":\"https://i.pravatar.cc/150?u=nora.fenwick\"}}"
+          "value": "{\"token\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjbXNmeXRqZmEwMDBldm1wOGRxdmoxNzZnIiwicm9sZSI6Ik1BTkFHRVIiLCJpYXQiOjE3ODYyNjAxNTQsImV4cCI6MTc4NjI4ODk1NH0.CamIg47n06RNX--yM2vF_8VZdFtPtWvyNlBJUCu8UVU\",\"user\":{\"id\":\"cmsfytjfa000evmp8dqvj176g\",\"firstName\":\"Nora\",\"lastName\":\"Fenwick\",\"workEmail\":\"nora.fenwick@example.com\",\"role\":\"MANAGER\",\"photoUrl\":\"https://i.pravatar.cc/150?u=nora.fenwick\"}}"
         }
       ]
     }

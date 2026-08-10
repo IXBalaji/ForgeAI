@@ -7,7 +7,7 @@ export const DEFAULT_AXE_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "be
 
 /** One raw finding from any scan source, before fingerprinting/DB persistence. */
 export interface RawFinding {
-  source: "axe" | "lighthouse" | "pa11y" | "vision";
+  source: "axe" | "pa11y" | "vision";
   wcagRule: string;
   selector: string;
   pageUrl: string;

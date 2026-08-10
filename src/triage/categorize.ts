@@ -1,4 +1,4 @@
-/** Scan-rule id (any source: axe, lighthouse, pa11y) -> human category. Unmapped rules fall back to a readable default. */
+/** Scan-rule id (any source: axe, pa11y) -> human category. Unmapped rules fall back to a readable default. */
 const CATEGORY_MAP: Record<string, string> = {
   "image-alt": "Missing alt text on images",
   "color-contrast": "Insufficient color contrast",

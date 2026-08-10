@@ -4,7 +4,6 @@ import { db } from "../db/client.js";
 import { scanRuns, issues } from "../db/schema.js";
 import type { Severity } from "../types/index.js";
 import { runAxeScan, fingerprintFinding, type RawFinding } from "./axe-scan.js";
-import { runLighthouseScan } from "./lighthouse-scan.js";
 import { runPa11yScan } from "./pa11y-scan.js";
 import { runVisionScan } from "./vision-scan.js";
 
@@ -74,9 +73,6 @@ function runAllSources(baseUrl: string, routes: string[], storageState?: object)
   const sourceRuns: Array<Promise<RawFinding[]>> = [
     runAxeScan(baseUrl, routes, { storageState }),
   ];
-  if (process.env.SCAN_LIGHTHOUSE !== "false") {
-    sourceRuns.push(runLighthouseScan(baseUrl, routes, { storageState }));
-  }
   if (process.env.SCAN_PA11Y !== "false") {
     sourceRuns.push(runPa11yScan(baseUrl, routes, { storageState }));
   }
@@ -101,7 +97,6 @@ export async function runScannerAgent(opts: ScannerOptions): Promise<ScannerResu
       toolVersions: {
         "axe-core": "4.10",
         playwright: "1.49",
-        lighthouse: process.env.SCAN_LIGHTHOUSE === "false" ? "disabled" : "12",
         pa11y: process.env.SCAN_PA11Y === "false" ? "disabled" : "8",
         "claude-vision": process.env.SCAN_VISION === "false" ? "disabled" : (process.env.ANTHROPIC_API_KEY ? "enabled" : "no-api-key"),
       },
@@ -126,7 +121,7 @@ export async function runScannerAgent(opts: ScannerOptions): Promise<ScannerResu
 
   const settled = await Promise.allSettled(allSourceRuns);
   const allFindings: RawFinding[] = [];
-  const bySource: Record<RawFinding["source"], number> = { axe: 0, lighthouse: 0, pa11y: 0, vision: 0 };
+  const bySource: Record<RawFinding["source"], number> = { axe: 0, pa11y: 0, vision: 0 };
 
   for (const result of settled) {
     if (result.status === "rejected") {

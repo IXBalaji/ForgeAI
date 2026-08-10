@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli/index.ts",
-    "scan": "playwright test && node src/scan/scripts/generate-a11y-report.mjs && tsx src/cli/index.ts scan",
+    "scan": "playwright test && node src/scan/scripts/generate-a11y-report.mjs",
     "scan:agent": "tsx src/cli/index.ts scan",
     "scan:playwright": "playwright test && node src/scan/scripts/generate-a11y-report.mjs",
     "triage": "tsx src/cli/index.ts triage",
@@ -38,7 +38,6 @@
     "commander": "^12.1.0",
     "dotenv": "^16.4.5",
     "drizzle-orm": "^0.36.4",
-    "lighthouse": "^12.2.1",
     "pa11y": "^8.0.0",
     "pg": "^8.13.1",
     "playwright": "^1.49.0",
