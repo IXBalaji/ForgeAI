@@ -39,6 +39,7 @@ export { PROJECT_KEY };
  * Developer runs at higher effort (it's generating the actual fix); Reviewer
  * at medium (it's verifying, not authoring).
  */
+export const CLASSIFIER_MODEL = process.env.CLASSIFIER_MODEL ?? "claude-haiku-4-5-20251001";
 export const DEVELOPER_MODEL = process.env.CLAUDE_DEVELOPER_MODEL ?? "claude-sonnet-5";
 export const DEVELOPER_EFFORT = process.env.CLAUDE_DEVELOPER_EFFORT ?? "high";
 export const REVIEWER_MODEL = process.env.CLAUDE_REVIEWER_MODEL ?? "claude-sonnet-5";

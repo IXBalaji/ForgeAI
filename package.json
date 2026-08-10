@@ -11,6 +11,8 @@
     "scan:agent": "tsx src/cli/index.ts scan",
     "scan:playwright": "playwright test && node src/scan/scripts/generate-a11y-report.mjs",
     "triage": "tsx src/cli/index.ts triage",
+    "triage:reports": "tsx src/cli/index.ts triage:reports",
+    "triage:reports:dry": "tsx src/cli/index.ts triage:reports --dry-run",
     "fix": "tsx src/cli/index.ts fix",
     "review": "tsx src/cli/index.ts review",
     "deploy": "tsx src/cli/index.ts deploy",

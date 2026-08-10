@@ -100,6 +100,41 @@ export async function createTicketStory(params: {
   return created.key;
 }
 
+/** Creates a richly-described Jira task/story from a triage ticket payload. Returns the issue key. */
+export async function createTriagedTicket(params: {
+  epicKey: string | null;
+  summary: string;
+  description: { type: "doc"; version: 1; content: any[] };
+  labels: string[];
+  priority?: string;
+}): Promise<string | null> {
+  if (!isJiraConfigured()) {
+    console.warn(`[jira] Jira not configured — ticket "${params.summary}" logged locally only.`);
+    return null;
+  }
+
+  const priorityMap: Record<string, string> = { P1: "Highest", P2: "High", P3: "Medium", P4: "Low" };
+
+  const fields: Record<string, any> = {
+    project: { key: JIRA_PROJECT_KEY },
+    summary: params.summary,
+    description: params.description,
+    issuetype: { name: "Task" },
+    labels: params.labels,
+  };
+
+  if (params.epicKey) fields.parent = { key: params.epicKey };
+  if (params.priority && priorityMap[params.priority]) {
+    fields.priority = { name: priorityMap[params.priority] };
+  }
+
+  const created = await jiraFetch("/rest/api/3/issue", {
+    method: "POST",
+    body: JSON.stringify({ fields }),
+  });
+  return created.key;
+}
+
 export async function transitionTicket(jiraKey: string, transitionName: string): Promise<void> {
   if (!isJiraConfigured()) return;
   const { transitions } = await jiraFetch(`/rest/api/3/issue/${jiraKey}/transitions`, { method: "GET" });

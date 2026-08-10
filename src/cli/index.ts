@@ -3,6 +3,7 @@ import "dotenv/config";
 import { Command } from "commander";
 import { runScannerAgent, type AuthRole } from "../scan/scanner-agent.js";
 import { runTriageAgent } from "../triage/triage-agent.js";
+import { triageFromReports } from "../triage/triage-from-reports.js";
 import { runDeveloperAgent } from "../development/developer-agent.js";
 import { runReviewerAgent } from "../review/reviewer-agent.js";
 import { runDeployAgent } from "../deploy/deploy-agent.js";
@@ -66,6 +67,23 @@ program
     const epicKey = await ensureEpic(cycleId);
     const result = await withSpan("agent.triage", () => runTriageAgent(opts.scanRun, epicKey));
     console.log(JSON.stringify({ cycleId, ...result }, null, 2));
+  });
+
+program
+  .command("triage:reports")
+  .description("Triage accessibility violations from a11y-report JSON files into Jira tickets")
+  .option("--report-dir <dir>", "directory containing axe JSON reports", "a11y-reports")
+  .option("--cycle <id>", "iteration cycle id for epic grouping")
+  .option("--dry-run", "classify and build tickets without creating them in Jira")
+  .action(async (opts) => {
+    const result = await withSpan("agent.triage-reports", () =>
+      triageFromReports({
+        reportDir: opts.reportDir,
+        cycleId: opts.cycle,
+        dryRun: opts.dryRun,
+      }),
+    );
+    console.log(JSON.stringify(result, null, 2));
   });
 
 program
