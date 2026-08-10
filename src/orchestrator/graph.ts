@@ -13,8 +13,9 @@
 import "dotenv/config";
 import { StateGraph, Annotation, Send, START, END } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
+import { desc } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { tickets, iterationCycles } from "../db/schema.js";
+import { tickets, iterationCycles, fixAttempts, reviewResults } from "../db/schema.js";
 import { inArray, eq, and } from "drizzle-orm";
 import { triageFromReports } from "../triage/triage-from-reports.js";
 import { runDeveloperAgent } from "../development/developer-agent.js";
@@ -35,6 +36,22 @@ const CycleState = Annotation.Root({
   cycleNumber: Annotation<number>,
   epicKey: Annotation<string | null>,
   ticketId: Annotation<string | null>,
+  fixAttemptId: Annotation<string | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  reviewVerdict: Annotation<"approved" | "rejected" | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  scopeGuardFlagged: Annotation<boolean>({
+    reducer: (_prev, next) => next,
+    default: () => false,
+  }),
+  shouldRetry: Annotation<boolean>({
+    reducer: (_prev, next) => next,
+    default: () => false,
+  }),
 });
 
 const TicketState = Annotation.Root({
@@ -72,15 +89,74 @@ async function triageNode(state: typeof CycleState.State) {
 
 async function routeAfterTriage(state: typeof CycleState.State) {
   const epicKey = state.epicKey;
+
+  // 1. Recover stale "in_review" tickets from a previous crashed run
+  const staleTickets = epicKey
+    ? await db.select().from(tickets).where(and(eq(tickets.status, "in_review"), eq(tickets.epicKey, epicKey)))
+    : await db.select().from(tickets).where(eq(tickets.status, "in_review"));
+
+  const sends: Send[] = [];
+
+  for (const ticket of staleTickets) {
+    const [latestAttempt] = await db
+      .select()
+      .from(fixAttempts)
+      .where(eq(fixAttempts.ticketId, ticket.id))
+      .orderBy(desc(fixAttempts.createdAt))
+      .limit(1);
+
+    if (!latestAttempt) {
+      // Has no fix attempt — reset to open so developer picks it up
+      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticket.id));
+      console.log(`[orchestrate] Recovered ticket ${ticket.jiraKey ?? ticket.id} — no fix attempt, reset to open.`);
+      continue;
+    }
+
+    const [review] = await db
+      .select()
+      .from(reviewResults)
+      .where(eq(reviewResults.fixAttemptId, latestAttempt.id));
+
+    if (!review) {
+      // Has fix attempt but no review — send to reviewer
+      console.log(`[orchestrate] Recovered ticket ${ticket.jiraKey ?? ticket.id} — fix attempt exists, sending to reviewer.`);
+      sends.push(new Send("reviewer", { ticketId: ticket.id, epicKey, fixAttemptId: latestAttempt.id }));
+    } else if (review.verdict === "approved" && !review.scopeGuardFlagged) {
+      // Reviewed and approved but never deployed — send to deploy
+      console.log(`[orchestrate] Recovered ticket ${ticket.jiraKey ?? ticket.id} — approved but not deployed, sending to deploy.`);
+      sends.push(new Send("deploy", { ticketId: ticket.id, epicKey, fixAttemptId: latestAttempt.id }));
+    } else {
+      // Reviewed but rejected/flagged — reset to open for retry
+      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticket.id));
+      console.log(`[orchestrate] Recovered ticket ${ticket.jiraKey ?? ticket.id} — review ${review.verdict}, reset to open.`);
+    }
+  }
+
+  // 2. Pick up new "open" tickets as before
   const openTickets = epicKey
     ? await db.select().from(tickets).where(and(eq(tickets.status, "open"), eq(tickets.epicKey, epicKey)))
     : await db.select().from(tickets).where(eq(tickets.status, "open"));
-  if (openTickets.length === 0 || state.cycleNumber >= MAX_CYCLES) {
-    console.log(`[orchestrate] ${openTickets.length === 0 ? "No open tickets" : "Max cycles reached"} — moving to release.`);
+
+  if (openTickets.length === 0 && sends.length === 0) {
+    if (state.cycleNumber >= MAX_CYCLES) {
+      console.log(`[orchestrate] Max cycles reached — moving to release.`);
+    } else {
+      console.log(`[orchestrate] No open or in-progress tickets — moving to release.`);
+    }
     return "release";
   }
-  console.log(`[orchestrate] ${openTickets.length} open ticket(s) — fanning out to developer agent.`);
-  return openTickets.map((t) => new Send("developer", { ticketId: t.id, epicKey: state.epicKey }));
+
+  if (state.cycleNumber >= MAX_CYCLES) {
+    console.log(`[orchestrate] Max cycles reached — moving to release (${openTickets.length} open, ${sends.length} recovered).`);
+    return "release";
+  }
+
+  for (const t of openTickets) {
+    sends.push(new Send("developer", { ticketId: t.id, epicKey: state.epicKey }));
+  }
+
+  console.log(`[orchestrate] ${openTickets.length} open + ${staleTickets.length} recovered ticket(s) — fanning out.`);
+  return sends;
 }
 
 async function developerNode(state: typeof TicketState.State) {
@@ -92,27 +168,53 @@ async function developerNode(state: typeof TicketState.State) {
   });
 }
 
-async function reviewerNode(state: typeof TicketState.State & { fixAttemptId: string }) {
-  return withSpan("agent.reviewer", async () => {
-    console.log(`[orchestrate] Running reviewer on fix attempt ${state.fixAttemptId}...`);
-    const verdict = await runReviewerAgent(state.fixAttemptId);
-    console.log(`[orchestrate] Reviewer verdict: ${verdict.verdict}${verdict.scopeGuardFlagged ? " (scope-flagged)" : ""}.`);
-    return { verdict } as any;
+function routeDevToReviewer(state: any) {
+  return new Send("reviewer", {
+    ticketId: state.ticketId,
+    epicKey: state.epicKey,
+    fixAttemptId: state.fixAttemptId,
   });
 }
 
-async function routeAfterReview(state: any) {
-  if (state.verdict.verdict === "rejected") {
-    const [ticket] = await db.select().from(tickets).where(eq(tickets.id, state.ticketId));
-    if (ticket?.status === "open") return "developer";
-    return END;
+async function reviewerNode(state: any) {
+  return withSpan("agent.reviewer", async () => {
+    console.log(`[orchestrate] Running reviewer on fix attempt ${state.fixAttemptId}...`);
+    const result = await runReviewerAgent(state.fixAttemptId);
+    console.log(`[orchestrate] Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""}.`);
+    return { reviewVerdict: result.verdict, scopeGuardFlagged: result.scopeGuardFlagged } as any;
+  });
+}
+
+function routeAfterReview(state: any) {
+  if (state.reviewVerdict === "rejected") {
+    const ticketId = state.ticketId;
+    return new Send("routeRejection", { ticketId, epicKey: state.epicKey, fixAttemptId: state.fixAttemptId });
   }
-  if (state.verdict.scopeGuardFlagged) return END;
+  if (state.scopeGuardFlagged) return END;
   if (!state.fixAttemptId) {
     console.log(`[orchestrate] No fix attempt to deploy — skipping deploy.`);
     return END;
   }
-  return "deploy";
+  return new Send("deploy", {
+    ticketId: state.ticketId,
+    epicKey: state.epicKey,
+    fixAttemptId: state.fixAttemptId,
+  });
+}
+
+async function routeRejectionNode(state: any) {
+  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, state.ticketId));
+  if (ticket?.status === "open") {
+    return { shouldRetry: true } as any;
+  }
+  return { shouldRetry: false } as any;
+}
+
+function routeRejectionEdge(state: any) {
+  if (state.shouldRetry) {
+    return new Send("developer", { ticketId: state.ticketId, epicKey: state.epicKey });
+  }
+  return END;
 }
 
 export function buildGraph() {
@@ -121,6 +223,7 @@ export function buildGraph() {
     .addNode("triage", triageNode)
     .addNode("developer", developerNode as any)
     .addNode("reviewer", reviewerNode as any)
+    .addNode("routeRejection", routeRejectionNode as any)
     .addNode("deploy", async (state: any) =>
       withSpan("agent.deploy", async () => {
         console.log(`[orchestrate] Running deploy on fix attempt ${state.fixAttemptId}...`);
@@ -140,9 +243,10 @@ export function buildGraph() {
     )
     .addEdge(START, "scan")
     .addEdge("scan", "triage")
-    .addConditionalEdges("triage", routeAfterTriage, ["developer", "release"])
-    .addEdge("developer", "reviewer")
-    .addConditionalEdges("reviewer", routeAfterReview, ["developer", "deploy", END])
+    .addConditionalEdges("triage", routeAfterTriage, ["developer", "reviewer", "deploy", "release"])
+    .addConditionalEdges("developer", routeDevToReviewer, ["reviewer"])
+    .addConditionalEdges("reviewer", routeAfterReview, ["routeRejection", "deploy", END])
+    .addConditionalEdges("routeRejection", routeRejectionEdge, ["developer", END])
     .addEdge("deploy", "scan")
     .addEdge("release", END);
 
@@ -169,7 +273,7 @@ async function _runOrchestratorCycle() {
   console.log(`[orchestrate] Flow: scan → triage → developer → reviewer → deploy → release`);
 
   await compiled.invoke(
-    { cycleId: cycle.id, cycleNumber: 0, epicKey: null, ticketId: null },
+    { cycleId: cycle.id, cycleNumber: 0, epicKey: null, ticketId: null, fixAttemptId: null, reviewVerdict: null, scopeGuardFlagged: false },
     { configurable: { thread_id: cycle.id } },
   );
 }

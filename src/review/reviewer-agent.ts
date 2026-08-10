@@ -11,9 +11,10 @@ import { testGate } from "./test-gate.js";
 import { adversarialReview } from "./adversarial-review.js";
 import { startEphemeralPreview } from "./ephemeral-preview.js";
 import { runAxeScan, fingerprintFinding } from "../scan/axe-scan.js";
+import { gitRepoMutex } from "../lib/mutex.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
-const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "master";
+const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "qa";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 
 export interface ReviewerVerdict {
@@ -28,22 +29,78 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
   if (!attempt) throw new Error(`FixAttempt ${fixAttemptId} not found`);
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, attempt.ticketId));
+  if (!ticket) {
+    console.error(`[reviewer] Ticket ${attempt.ticketId} not found — rejecting fix attempt.`);
+    const [reviewResult] = await db
+      .insert(reviewResults)
+      .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: `Ticket ${attempt.ticketId} not found in database.` })
+      .returning();
+    return { reviewResultId: reviewResult.id, verdict: "rejected" as const, scopeGuardFlagged: false };
+  }
 
   const baseName = attempt.branch.replace(/\//g, "-");
   const suffix = `-review-${Date.now()}`;
   let worktreeDir = join(TARGET_REPO_PATH, "..", ".worktrees", baseName);
 
-  await run("git", ["fetch", "origin", attempt.branch, QA_BRANCH], TARGET_REPO_PATH);
-  await run("git", ["worktree", "prune"], TARGET_REPO_PATH);
-
-  if (existsSync(worktreeDir)) {
+  // Serialize git operations — git holds a repo-level lock
+  let releaseLock = await gitRepoMutex.acquire();
+  try {
     try {
-      rmSync(worktreeDir, { recursive: true, force: true });
-    } catch {
-      worktreeDir = join(TARGET_REPO_PATH, "..", ".worktrees", baseName + suffix);
+      await run("git", ["fetch", "origin", QA_BRANCH], TARGET_REPO_PATH);
+    } catch (err) {
+      console.error(`[reviewer] git fetch failed: ${(err as Error).message}`);
+      const [reviewResult] = await db
+        .insert(reviewResults)
+        .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: `git fetch failed: ${(err as Error).message.slice(0, 500)}` })
+        .returning();
+      return { reviewResultId: reviewResult.id, verdict: "rejected" as const, scopeGuardFlagged: false };
     }
+
+    // Try fetching fix branch from remote; it may only exist locally if push failed
+    let branchRef = `origin/${attempt.branch}`;
+    try {
+      await run("git", ["fetch", "origin", attempt.branch], TARGET_REPO_PATH);
+    } catch {
+      // Check if the branch exists locally
+      try {
+        await run("git", ["rev-parse", "--verify", attempt.branch], TARGET_REPO_PATH);
+        branchRef = attempt.branch;
+        console.log(`[reviewer] Branch ${attempt.branch} not on remote — using local ref.`);
+      } catch {
+        console.error(`[reviewer] Branch ${attempt.branch} not found locally or on remote.`);
+        const [reviewResult] = await db
+          .insert(reviewResults)
+          .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: `Branch ${attempt.branch} not found locally or on remote.` })
+          .returning();
+        return { reviewResultId: reviewResult.id, verdict: "rejected" as const, scopeGuardFlagged: false };
+      }
+    }
+
+    await run("git", ["worktree", "prune"], TARGET_REPO_PATH).catch(() => {});
+
+    if (existsSync(worktreeDir)) {
+      try {
+        await run("git", ["worktree", "remove", worktreeDir, "--force"], TARGET_REPO_PATH);
+      } catch {
+        try { rmSync(worktreeDir, { recursive: true, force: true }); } catch {
+          worktreeDir = join(TARGET_REPO_PATH, "..", ".worktrees", baseName + suffix);
+        }
+      }
+    }
+
+    try {
+      await run("git", ["worktree", "add", worktreeDir, branchRef], TARGET_REPO_PATH);
+    } catch (err) {
+      console.error(`[reviewer] git worktree add failed: ${(err as Error).message}`);
+      const [reviewResult] = await db
+        .insert(reviewResults)
+        .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: `git worktree add failed: ${(err as Error).message.slice(0, 500)}` })
+        .returning();
+      return { reviewResultId: reviewResult.id, verdict: "rejected" as const, scopeGuardFlagged: false };
+    }
+  } finally {
+    releaseLock();
   }
-  await run("git", ["worktree", "add", worktreeDir, `origin/${attempt.branch}`], TARGET_REPO_PATH);
 
   const { stdout: nameOnly } = await run("git", ["diff", "--name-only", `origin/${QA_BRANCH}`], worktreeDir);
   const touchedFiles = nameOnly.trim().split("\n").filter(Boolean);
@@ -68,7 +125,10 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   const ticketIssues = await db.select().from(issues).where(inArray(issues.id, (ticket?.issueIds as string[]) ?? []));
 
   // Targeted re-scan — non-blocking; ephemeral preview may not be available
-  const pagesTouched = [...new Set(ticketIssues.map((i) => new URL(i.pageUrl).pathname))];
+  const pagesTouched = [...new Set(ticketIssues.map((i) => {
+    try { return new URL(i.pageUrl).pathname; }
+    catch { return i.pageUrl; }
+  }).filter(Boolean))];
   let resolvedIssueIds: string[] = [];
   let stillFailing: string[] = [];
   let rescanSkipped = false;
@@ -137,10 +197,13 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   }
   // verdict === "approved" && !guard.flagged -> stays "in_review"; the Deploy agent sets "done".
 
+  releaseLock = await gitRepoMutex.acquire();
   try {
     await run("git", ["worktree", "remove", worktreeDir], TARGET_REPO_PATH);
   } catch {
     console.warn(`[reviewer] Could not remove worktree at ${worktreeDir} — clean up manually.`);
+  } finally {
+    releaseLock();
   }
 
   return { reviewResultId: reviewResult.id, verdict, scopeGuardFlagged: guard.flagged };

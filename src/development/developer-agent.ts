@@ -5,13 +5,13 @@ import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { tickets, fixAttempts } from "../db/schema.js";
 import { run } from "../lib/exec.js";
-import { openPullRequest } from "../integrations/github.js";
 import { transitionTicket } from "../integrations/jira.js";
-import { LABEL_PREFIX, LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT } from "../lib/config.js";
+import { LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT } from "../lib/config.js";
 import { buildPrompt } from "./prompt-builder.js";
+import { gitRepoMutex } from "../lib/mutex.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
-const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "master";
+const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "qa";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const GITHUB_OWNER = process.env.GITHUB_OWNER ?? "";
@@ -106,51 +106,53 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   const branch = `${LABEL_PREFIX_SLUG}/${shortId}-attempt-${attemptNumber}`;
   const worktreeDir = join(TARGET_REPO_PATH, "..", `.worktrees`, branch.replace(/\//g, "-"));
 
-  await ensureWorktree(branch, worktreeDir);
+  // Serialize git worktree creation — git holds a repo-level lock
+  let releaseLock = await gitRepoMutex.acquire();
+  try {
+    await run("git", ["fetch", "origin", QA_BRANCH], TARGET_REPO_PATH);
+    await ensureWorktree(branch, worktreeDir);
+  } finally {
+    releaseLock();
+  }
 
+  // Claude SDK fix runs unlocked — multiple tickets fix in parallel
   const prompt = await buildPrompt(ticketId);
   await runAgentWithRetry(prompt, worktreeDir);
 
+  // Re-acquire lock for commit, push, and worktree cleanup
   let commitSha: string | null = null;
-  let prUrl: string | null = null;
+  const prUrl: string | null = null;
+  releaseLock = await gitRepoMutex.acquire();
   try {
-    await run("git", ["add", "-A"], worktreeDir);
-    await run("git", ["commit", "-m", `fix(${LABEL_PREFIX_SLUG}): ${branch}`], worktreeDir);
-    const { stdout } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
-    commitSha = stdout.trim();
-  } catch (err) {
-    console.warn("[developer] Nothing to commit — likely no changes were made.", err);
-  }
-
-  if (commitSha) {
     try {
-      if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-        const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
-        await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
+      await run("git", ["add", "-A"], worktreeDir);
+      await run("git", ["commit", "-m", `fix(${LABEL_PREFIX_SLUG}): ${branch}`], worktreeDir);
+      const { stdout } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
+      commitSha = stdout.trim();
+    } catch (err) {
+      console.warn("[developer] Nothing to commit — likely no changes were made.", err);
+    }
+
+    if (commitSha) {
+      try {
+        if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+          const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+          await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
+        }
+        await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
+      } catch (err) {
+        console.warn("[developer] Push failed.", err);
       }
-      await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
-    } catch (err) {
-      console.warn("[developer] Push failed.", err);
+
     }
 
     try {
-      const pr = await openPullRequest({
-        head: branch,
-        base: QA_BRANCH,
-        title: `[${LABEL_PREFIX}] Fix: ${branch}`,
-        body: `Automated accessibility fix for ticket ${ticketId} (attempt ${attemptNumber}).`,
-        draft: true,
-      });
-      prUrl = pr?.url ?? null;
-    } catch (err) {
-      console.warn("[developer] PR creation failed.", err);
+      await run("git", ["worktree", "remove", worktreeDir], TARGET_REPO_PATH);
+    } catch {
+      console.warn(`[developer] Could not remove worktree at ${worktreeDir} — clean up manually.`);
     }
-  }
-
-  try {
-    await run("git", ["worktree", "remove", worktreeDir], TARGET_REPO_PATH);
-  } catch {
-    console.warn(`[developer] Could not remove worktree at ${worktreeDir} — clean up manually.`);
+  } finally {
+    releaseLock();
   }
 
   const [attempt] = await db

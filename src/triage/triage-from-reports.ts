@@ -3,8 +3,9 @@ import crypto from "node:crypto";
 import { readReportDir, aggregateByRule } from "./report-reader.js";
 import { classifyIssues } from "./issue-classifier.js";
 import { buildTicketPayloads, type JiraTicketPayload } from "./ticket-builder.js";
-import { ensureEpic, createTriagedTicket } from "../integrations/jira.js";
+import { ensureEpic, createTriagedTicket, findExistingJiraTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX } from "../lib/config.js";
+import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { scanRuns, issues, tickets as ticketsTable } from "../db/schema.js";
 import { categorize } from "./categorize.js";
@@ -93,19 +94,41 @@ export async function triageFromReports(opts: {
 
     let jiraKey: string | null = null;
     if (!opts.dryRun) {
-      try {
-        jiraKey = await createTriagedTicket({
-          epicKey,
-          summary: payload.summary,
-          description: payload.description,
+      const category = categorize(payload.classified.ruleId);
+      const [existingForJira] = await db
+        .select()
+        .from(ticketsTable)
+        .where(and(eq(ticketsTable.category, category), inArray(ticketsTable.status, ["open", "in_review"])));
+
+      if (existingForJira?.jiraKey) {
+        jiraKey = existingForJira.jiraKey;
+        console.log(`[triage] Reusing existing Jira ticket ${jiraKey} for category "${category}" (from local DB)`);
+      } else {
+        // Check Jira directly for an existing open ticket before creating a new one
+        const existingJiraKey = await findExistingJiraTicket({
+          summaryPrefix: `[${LABEL_PREFIX}] ${category}`,
           labels: payload.labels,
-          priority: payload.priority,
         });
-        if (jiraKey) {
-          console.log(`[triage] Created ${jiraKey}: ${payload.summary}`);
+
+        if (existingJiraKey) {
+          jiraKey = existingJiraKey;
+          console.log(`[triage] Found existing Jira ticket ${jiraKey} for category "${category}" — skipping creation`);
+        } else {
+          try {
+            jiraKey = await createTriagedTicket({
+              epicKey,
+              summary: payload.summary,
+              description: payload.description,
+              labels: payload.labels,
+              priority: payload.priority,
+            });
+            if (jiraKey) {
+              console.log(`[triage] Created ${jiraKey}: ${payload.summary}`);
+            }
+          } catch (err) {
+            console.error(`[triage] Failed to create Jira ticket: ${(err as Error).message}`);
+          }
         }
-      } catch (err) {
-        console.error(`[triage] Failed to create Jira ticket: ${(err as Error).message}`);
       }
 
       const issueIds: string[] = [];
@@ -141,11 +164,20 @@ export async function triageFromReports(opts: {
         }
       }
 
-      if (issueIds.length > 0 || jiraKey) {
+      const [existingTicket] = await db
+        .select()
+        .from(ticketsTable)
+        .where(and(eq(ticketsTable.category, category), inArray(ticketsTable.status, ["open", "in_review"])));
+
+      if (existingTicket) {
+        const mergedIds = [...new Set([...(existingTicket.issueIds as string[]), ...issueIds])];
+        await db.update(ticketsTable).set({ issueIds: mergedIds }).where(eq(ticketsTable.id, existingTicket.id));
+        console.log(`[triage] Merged ${issueIds.length} issue(s) into existing ticket ${existingTicket.jiraKey ?? existingTicket.id} (category: ${category})`);
+      } else if (issueIds.length > 0 || jiraKey) {
         await db.insert(ticketsTable).values({
           jiraKey,
           epicKey,
-          category: categorize(payload.classified.ruleId),
+          category,
           issueIds,
           status: "open",
         });

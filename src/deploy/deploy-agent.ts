@@ -2,18 +2,12 @@ import "dotenv/config";
 import { eq } from "drizzle-orm";
 import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
-import { fixAttempts, tickets, deployments } from "../db/schema.js";
-import { mergePullRequest, createTag } from "../integrations/github.js";
+import { fixAttempts, tickets, deployments, reviewResults } from "../db/schema.js";
+import { mergeBranch, createTag } from "../integrations/github.js";
 import { transitionTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
 
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
-
-function prNumberFromUrl(prUrl: string | null): number | null {
-  if (!prUrl) return null;
-  const match = prUrl.match(/\/pull\/(\d+)/);
-  return match ? Number(match[1]) : null;
-}
 
 export interface DeployResult {
   deploymentId: string | null;
@@ -32,15 +26,24 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
   if (!attempt) throw new Error(`FixAttempt ${fixAttemptId} not found`);
 
-  const prNumber = prNumberFromUrl(attempt.prUrl);
-  if (!prNumber) {
-    console.warn(`[deploy] FixAttempt ${fixAttemptId} has no PR — nothing to merge.`);
-    return { deploymentId: null, commitSha: null, tag: null };
+  const [review] = await db.select().from(reviewResults).where(eq(reviewResults.fixAttemptId, fixAttemptId));
+  if (!review || review.verdict !== "approved" || review.scopeGuardFlagged) {
+    const reason = !review ? "no review result" : review.scopeGuardFlagged ? "scope-flagged for manual review" : `verdict: ${review.verdict}`;
+    console.warn(`[deploy] FixAttempt ${fixAttemptId} not cleared for merge — ${reason}.`);
+    const [deployment] = await db
+      .insert(deployments)
+      .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
+      .returning();
+    return { deploymentId: deployment.id, commitSha: null, tag: null };
   }
 
-  const commitSha = await mergePullRequest(prNumber, "squash");
+  const commitSha = await mergeBranch(
+    attempt.branch,
+    QA_BRANCH,
+    `fix(${LABEL_PREFIX_SLUG}): merge ${attempt.branch} into ${QA_BRANCH}`,
+  );
   if (!commitSha) {
-    console.warn(`[deploy] Merge did not return a commit sha — GitHub may not be configured.`);
+    console.warn(`[deploy] Merge did not return a commit sha — GitHub may not be configured or branch is missing.`);
   }
 
   let tag: string | null = null;

@@ -19,6 +19,13 @@ export async function testGate(worktreeDir: string, touchedFiles: string[]): Pro
   for (const ws of workspaces) {
     const wsDir = join(worktreeDir, ws);
 
+    try {
+      await run("npm", ["install", "--ignore-scripts"], wsDir);
+    } catch (err) {
+      outputs.push(`[${ws}:install] FAILED — ${(err as Error).message.slice(0, 300)}`);
+      return { passed: false, output: outputs.join("\n") };
+    }
+
     // Build check
     try {
       await run("npm", ["run", "build", "--if-present"], wsDir);

@@ -81,6 +81,18 @@ export async function mergePullRequest(prNumber: number, mergeMethod: "squash" |
   return result.sha ?? null;
 }
 
+export async function mergeBranch(head: string, base: string, commitMessage: string): Promise<string | null> {
+  if (!isGitHubConfigured()) {
+    console.warn(`[github] GitHub not configured — branch "${head}" was not merged into "${base}".`);
+    return null;
+  }
+  const result = await ghFetch(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/merges`, {
+    method: "POST",
+    body: JSON.stringify({ base, head, commit_message: commitMessage }),
+  });
+  return result?.sha ?? null;
+}
+
 /**
  * Creates a lightweight tag pointing at commitSha via the Git References API —
  * this is the rollback mechanism from the guardrails doc: "redeploy the last-

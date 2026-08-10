@@ -107,6 +107,28 @@ export async function createTicketStory(params: {
   return created.key;
 }
 
+/** Searches Jira for an existing open/in-progress ticket matching the given summary prefix and labels. */
+export async function findExistingJiraTicket(params: {
+  summaryPrefix: string;
+  labels: string[];
+}): Promise<string | null> {
+  if (!isJiraConfigured()) return null;
+
+  const escapedSummary = params.summaryPrefix.replace(/"/g, '\\"');
+  const labelClause = params.labels.map((l) => `labels = "${l}"`).join(" AND ");
+  const jql = `project = "${JIRA_PROJECT_KEY}" AND summary ~ "${escapedSummary}" AND ${labelClause} AND statusCategory != Done ORDER BY created DESC`;
+
+  try {
+    const issues = await searchTickets(jql, 1);
+    if (issues.length > 0) {
+      return issues[0].key;
+    }
+  } catch (err) {
+    console.warn(`[jira] Duplicate search failed (non-blocking): ${(err as Error).message.slice(0, 200)}`);
+  }
+  return null;
+}
+
 /** Creates a richly-described Jira task/story from a triage ticket payload. Returns the issue key. */
 export async function createTriagedTicket(params: {
   epicKey: string | null;
