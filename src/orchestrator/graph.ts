@@ -20,7 +20,7 @@ import { StateGraph, Annotation, Send, START, END } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { db } from "../db/client.js";
 import { tickets, iterationCycles } from "../db/schema.js";
-import { inArray, eq } from "drizzle-orm";
+import { inArray, eq, and } from "drizzle-orm";
 import { runScannerAgent } from "../scan/scanner-agent.js";
 import { runTriageAgent } from "../triage/triage-agent.js";
 import { runDeveloperAgent } from "../development/developer-agent.js";
@@ -67,7 +67,10 @@ async function triageNode(state: typeof CycleState.State) {
 
 /** Fan out to one Send-spawned branch per auto-retriable open ticket, or move to release. */
 async function routeAfterTriage(state: typeof CycleState.State) {
-  const openTickets = await db.select().from(tickets).where(inArray(tickets.status, ["open"]));
+  const epicKey = state.epicKey;
+  const openTickets = epicKey
+    ? await db.select().from(tickets).where(and(eq(tickets.status, "open"), eq(tickets.epicKey, epicKey)))
+    : await db.select().from(tickets).where(eq(tickets.status, "open"));
   if (openTickets.length === 0 || state.cycleNumber >= MAX_CYCLES) {
     return "release";
   }

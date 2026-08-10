@@ -1,6 +1,6 @@
 import { test } from "@playwright/test";
-import { runAxeScan, AXE_TAGS } from "./helpers/axe";
-import { authFile, gotoAuthed, goToNavLink } from "./helpers/auth";
+import { runAxeScan, AXE_TAGS } from "./helpers/axe.js";
+import { authFile, gotoAuthed, goToNavLink } from "./helpers/auth.js";
 
 test.describe("Manager role", () => {
   test.use({ storageState: authFile("manager") });

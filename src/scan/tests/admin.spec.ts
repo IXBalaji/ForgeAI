@@ -1,6 +1,6 @@
 import { test } from "@playwright/test";
-import { runAxeScan, AXE_TAGS } from "./helpers/axe";
-import { authFile, gotoAuthed, goToNavLink } from "./helpers/auth";
+import { runAxeScan, AXE_TAGS } from "./helpers/axe.js";
+import { authFile, gotoAuthed, goToNavLink } from "./helpers/auth.js";
 import { expect } from "@playwright/test";
 
 test.describe("Admin role", () => {

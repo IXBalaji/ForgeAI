@@ -1,8 +1,8 @@
 import { Page, TestInfo } from "@playwright/test";
-import AxeBuilder from "@axe-core/playwright";
+import { AxeBuilder } from "@axe-core/playwright";
 import fs from "fs";
 import path from "path";
-import { DEFAULT_AXE_TAGS } from "../../axe-scan";
+import { DEFAULT_AXE_TAGS } from "../../axe-scan.js";
 
 export const REPORT_DIR = path.join(process.cwd(), "a11y-reports");
 

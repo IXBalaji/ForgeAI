@@ -123,6 +123,65 @@ program
   });
 
 program
+  .command("sync:jira")
+  .description("Sync open accessibility tickets from Jira into the local DB for the fix pipeline")
+  .option("--jql <jql>", "custom JQL query override")
+  .option("--max <n>", "max tickets to sync", "50")
+  .action(async (opts) => {
+    const { syncJiraTickets } = await import("../triage/jira-scanner.js");
+    const result = await withSpan("sync.jira", () =>
+      syncJiraTickets({
+        jql: opts.jql,
+        maxResults: parseInt(opts.max),
+      }),
+    );
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+program
+  .command("fix:all")
+  .description("Run the developer agent on all open tickets in the local DB")
+  .option("--limit <n>", "max tickets to process", "10")
+  .action(async (opts) => {
+    const { inArray } = await import("drizzle-orm");
+    const { tickets } = await import("../db/schema.js");
+    const openTickets = await db
+      .select()
+      .from(tickets)
+      .where(inArray(tickets.status, ["open"]))
+      .limit(parseInt(opts.limit));
+
+    if (openTickets.length === 0) {
+      console.log("[fix:all] No open tickets found in local DB");
+      return;
+    }
+
+    const maxRetries = 2;
+    console.log(`[fix:all] Found ${openTickets.length} open ticket(s)`);
+    for (const ticket of openTickets) {
+      console.log(`[fix:all] Processing ticket ${ticket.id} (${ticket.jiraKey ?? "no jira key"})`);
+      let succeeded = false;
+      for (let retry = 0; retry <= maxRetries && !succeeded; retry++) {
+        try {
+          if (retry > 0) console.log(`[fix:all] Retrying ticket ${ticket.id} (attempt ${retry + 1}/${maxRetries + 1})`);
+          const result = await withSpan("agent.developer", () => runDeveloperAgent(ticket.id));
+          console.log(JSON.stringify(result, null, 2));
+          succeeded = true;
+        } catch (err) {
+          const msg = (err as Error).message;
+          console.error(`[fix:all] Failed on ticket ${ticket.id}: ${msg}`);
+          if (retry < maxRetries) {
+            const delay = Math.min(2000 * 2 ** retry, 15000);
+            console.log(`[fix:all] Waiting ${delay / 1000}s before retry...`);
+            await new Promise((r) => setTimeout(r, delay));
+          }
+        }
+      }
+      if (!succeeded) console.error(`[fix:all] Gave up on ticket ${ticket.id} after ${maxRetries + 1} attempts`);
+    }
+  });
+
+program
   .command("orchestrate")
   .description("Run the full autonomous LangGraph cycle: scan -> triage -> fix -> review -> deploy -> loop -> release")
   .action(async () => {

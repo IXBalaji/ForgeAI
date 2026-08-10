@@ -1,6 +1,6 @@
 import { test as setup } from "@playwright/test";
-import { login, authFile } from "./helpers/auth";
-import type { Role } from "./fixtures/users";
+import { login, authFile } from "./helpers/auth.js";
+import type { Role } from "./fixtures/users.js";
 
 const ROLES: Role[] = ["admin", "manager", "employee"];
 

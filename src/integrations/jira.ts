@@ -135,6 +135,22 @@ export async function createTriagedTicket(params: {
   return created.key;
 }
 
+export async function searchTickets(jql: string, maxResults = 50): Promise<any[]> {
+  if (!isJiraConfigured()) {
+    throw new Error("Jira not configured — set JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN");
+  }
+  // Migrated from /rest/api/3/search (removed by Atlassian): https://developer.atlassian.com/changelog/#CHANGE-2046
+  const result = await jiraFetch("/rest/api/3/search/jql", {
+    method: "POST",
+    body: JSON.stringify({
+      jql,
+      maxResults,
+      fields: ["summary", "description", "status", "labels", "priority", "parent"],
+    }),
+  });
+  return result.issues ?? [];
+}
+
 export async function transitionTicket(jiraKey: string, transitionName: string): Promise<void> {
   if (!isJiraConfigured()) return;
   const { transitions } = await jiraFetch(`/rest/api/3/issue/${jiraKey}/transitions`, { method: "GET" });

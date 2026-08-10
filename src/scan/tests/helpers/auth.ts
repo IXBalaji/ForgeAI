@@ -1,6 +1,6 @@
 import path from "node:path";
 import { Page, expect } from "@playwright/test";
-import { Role, USERS } from "../fixtures/users";
+import { Role, USERS } from "../fixtures/users.js";
 
 export const AUTH_DIR = path.join(process.cwd(), "playwright/.auth");
 

@@ -1,7 +1,7 @@
 import "dotenv/config";
-import { inArray } from "drizzle-orm";
+import { inArray, and, eq } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { tickets } from "../db/schema.js";
+import { tickets, iterationCycles } from "../db/schema.js";
 import { openPullRequest } from "../integrations/github.js";
 import { notifySlack } from "../lib/notify.js";
 import { sendEmail } from "../integrations/email.js";
@@ -17,9 +17,20 @@ const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "master";
  * exception in one place, per architecture doc §01/§06. Never merges.
  */
 export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
-  const doneTickets = await db.select().from(tickets).where(inArray(tickets.status, ["done"]));
-  const parkedTickets = await db.select().from(tickets).where(inArray(tickets.status, ["parked"]));
-  const flaggedTickets = await db.select().from(tickets).where(inArray(tickets.status, ["flagged"]));
+  const [cycle] = await db.select().from(iterationCycles).where(eq(iterationCycles.id, cycleId));
+  const epicKey = cycle?.epicKey ?? null;
+
+  const epicFilter = epicKey ? eq(tickets.epicKey, epicKey) : undefined;
+
+  const doneTickets = await db.select().from(tickets).where(
+    epicFilter ? and(eq(tickets.status, "done"), epicFilter) : eq(tickets.status, "done"),
+  );
+  const parkedTickets = await db.select().from(tickets).where(
+    epicFilter ? and(eq(tickets.status, "parked"), epicFilter) : eq(tickets.status, "parked"),
+  );
+  const flaggedTickets = await db.select().from(tickets).where(
+    epicFilter ? and(eq(tickets.status, "flagged"), epicFilter) : eq(tickets.status, "flagged"),
+  );
 
   const reportBody = [
     `**Fixed & verified (${doneTickets.length}):**`,

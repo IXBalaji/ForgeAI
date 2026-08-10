@@ -1,9 +1,13 @@
 import path from "node:path";
+import crypto from "node:crypto";
 import { readReportDir, aggregateByRule } from "./report-reader.js";
 import { classifyIssues } from "./issue-classifier.js";
 import { buildTicketPayloads, type JiraTicketPayload } from "./ticket-builder.js";
 import { ensureEpic, createTriagedTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX } from "../lib/config.js";
+import { db } from "../db/client.js";
+import { scanRuns, issues, tickets as ticketsTable } from "../db/schema.js";
+import { categorize } from "./categorize.js";
 
 export interface TriageFromReportsResult {
   epicKey: string | null;
@@ -23,6 +27,10 @@ export interface TriageFromReportsResult {
     pagesScanned: number;
     byIssueType: Record<string, number>;
     byPriority: Record<string, number>;
+  };
+  dbSync: {
+    ticketsCreated: number;
+    issuesCreated: number;
   };
 }
 
@@ -46,6 +54,7 @@ export async function triageFromReports(opts: {
       epicKey: null,
       tickets: [],
       summary: { totalViolationTypes: 0, totalElements: 0, pagesScanned: pages.length, byIssueType: {}, byPriority: {} },
+      dbSync: { ticketsCreated: 0, issuesCreated: 0 },
     };
   }
 
@@ -59,9 +68,24 @@ export async function triageFromReports(opts: {
     epicKey = await ensureEpic(opts.cycleId);
   }
 
-  const tickets: TriageFromReportsResult["tickets"] = [];
+  let syntheticScanRunId: string | null = null;
+  if (!opts.dryRun) {
+    const [syntheticRun] = await db
+      .insert(scanRuns)
+      .values({
+        targetEnv: "report-import",
+        toolVersions: { source: "triage-from-reports", reportDir },
+        triggeredBy: "triage-from-reports",
+      })
+      .returning();
+    syntheticScanRunId = syntheticRun.id;
+  }
+
+  const resultTickets: TriageFromReportsResult["tickets"] = [];
   const byIssueType: Record<string, number> = {};
   const byPriority: Record<string, number> = {};
+  let dbTicketsCreated = 0;
+  let dbIssuesCreated = 0;
 
   for (const payload of payloads) {
     byIssueType[payload.issueType] = (byIssueType[payload.issueType] ?? 0) + 1;
@@ -83,13 +107,57 @@ export async function triageFromReports(opts: {
       } catch (err) {
         console.error(`[triage] Failed to create Jira ticket: ${(err as Error).message}`);
       }
+
+      const issueIds: string[] = [];
+      for (const page of payload.classified.affectedPages) {
+        for (const node of page.nodes) {
+          const selector = node.target?.join(" ") ?? "unknown";
+          const fingerprint = crypto
+            .createHash("sha256")
+            .update(`${payload.classified.ruleId}:${selector}:${page.url}`)
+            .digest("hex");
+
+          try {
+            const [inserted] = await db
+              .insert(issues)
+              .values({
+                scanRunId: syntheticScanRunId!,
+                fingerprint,
+                wcagRule: payload.classified.ruleId,
+                selector,
+                pageUrl: page.url,
+                severity: payload.classified.impact,
+                status: "ticketed",
+              })
+              .onConflictDoNothing()
+              .returning();
+            if (inserted) {
+              issueIds.push(inserted.id);
+              dbIssuesCreated++;
+            }
+          } catch (err) {
+            console.warn(`[triage] Skipped duplicate issue: ${fingerprint.slice(0, 8)}`);
+          }
+        }
+      }
+
+      if (issueIds.length > 0 || jiraKey) {
+        await db.insert(ticketsTable).values({
+          jiraKey,
+          epicKey,
+          category: categorize(payload.classified.ruleId),
+          issueIds,
+          status: "open",
+        });
+        dbTicketsCreated++;
+      }
     } else {
       console.log(`[triage] [dry-run] Would create: ${payload.summary}`);
       console.log(`         Type: ${payload.issueType} | Priority: ${payload.priority} | Impact: ${payload.classified.impact}`);
       console.log(`         Pages: ${payload.classified.affectedPages.length} | Elements: ${payload.classified.totalNodeCount}`);
     }
 
-    tickets.push({
+    resultTickets.push({
       jiraKey,
       summary: payload.summary,
       ruleId: payload.classified.ruleId,
@@ -105,13 +173,17 @@ export async function triageFromReports(opts: {
 
   return {
     epicKey,
-    tickets,
+    tickets: resultTickets,
     summary: {
       totalViolationTypes: aggregated.length,
       totalElements,
       pagesScanned: pages.length,
       byIssueType,
       byPriority,
+    },
+    dbSync: {
+      ticketsCreated: dbTicketsCreated,
+      issuesCreated: dbIssuesCreated,
     },
   };
 }

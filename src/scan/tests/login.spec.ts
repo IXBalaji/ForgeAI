@@ -1,6 +1,6 @@
 import { test, expect } from "@playwright/test";
-import { runAxeScan, AXE_TAGS } from "./helpers/axe";
-import { USERS } from "./fixtures/users";
+import { runAxeScan, AXE_TAGS } from "./helpers/axe.js";
+import { USERS } from "./fixtures/users.js";
 
 test.describe("Login page", () => {
   test("full accessibility scan of the sign-in form", async ({ page }, testInfo) => {
