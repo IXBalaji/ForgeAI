@@ -183,7 +183,7 @@ program
 
 program
   .command("orchestrate")
-  .description("Run the full autonomous LangGraph cycle: scan -> triage -> fix -> review -> deploy -> loop -> release")
+  .description("Run the full autonomous LangGraph cycle: scan -> triage:reports -> sync:jira -> fix -> review -> deploy -> loop -> release")
   .action(async () => {
     await runOrchestratorCycle();
   });

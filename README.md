@@ -13,7 +13,7 @@ the end-of-cycle PR) lives in the earlier design-session doc.
 ## Stack
 
 Node.js 22+, TypeScript, LangGraph (+ its Postgres checkpointer), Claude Agent SDK,
-Drizzle ORM, Playwright + axe-core + Lighthouse + Pa11y + a Claude vision pass,
+Drizzle ORM, Playwright + axe-core + Pa11y + a Claude vision pass,
 Jira REST v3, GitHub REST API, SendGrid, OpenTelemetry. See `.env.example` for
 every credential each piece needs — everything beyond `DATABASE_URL` and the
 target-app vars is optional and degrades gracefully (a clear console warning,
@@ -36,7 +36,7 @@ Fill in `.env`:
 | `TARGET_FRONTEND_URL`, `TARGET_SCAN_ROUTES` | Scanner agent |
 | `ANTHROPIC_API_KEY` | Developer agent's fix, Reviewer agent's adversarial review, the vision scan source |
 | `CLAUDE_DEVELOPER_MODEL`/`_EFFORT`, `CLAUDE_REVIEWER_MODEL`/`_EFFORT` | optional — model/effort tiering, defaults to Sonnet |
-| `SCAN_LIGHTHOUSE`/`SCAN_PA11Y`/`SCAN_VISION` | optional — set to `"false"` to disable a scan source |
+| `SCAN_PA11Y`/`SCAN_VISION` | optional — set to `"false"` to disable a scan source |
 | `JIRA_*` | Triage agent's ticket creation — without it, tickets are still created in Postgres, just not in Jira |
 | `GITHUB_*` | Developer agent's PR, Deploy agent's merge + rollback tag, Release agent's final PR |
 | `SLACK_WEBHOOK_URL`, `SENDGRID_API_KEY`/`EMAIL_*` | Release agent's notification — without either, the report just prints to console |
@@ -67,34 +67,41 @@ Every agent is a plain function with a matching CLI subcommand — this is what
 orchestrator graph is a convenience wrapper, not a dependency.
 
 ```bash
-npm run scan                              # Scanner only, no tickets created
-npm run triage -- --scan-run <scanRunId>  # Triage against a specific scan
-npm run fix -- --ticket <ticketId>        # Developer agent, one ticket
+npm run scan                              # Playwright + axe-core against src/scan/tests, writes a11y-reports/*.json
+npm run triage:reports                    # Triage the JSON reports above into Jira tickets + local DB
+npm run sync:jira                         # Pull any open Jira tickets not yet tracked locally into the DB
+npm run fix:all                           # Developer agent against every open ticket in the local DB
 npm run review -- --attempt <fixAttemptId>
 npm run deploy -- --attempt <fixAttemptId>
 npm run release -- --cycle <cycleId>
 ```
 
+Two older, DB-only equivalents of scan/triage are also still wired up as standalone
+CLI subcommands (`npm run scan:agent`, `npm run triage -- --scan-run <scanRunId>`) —
+they predate the report-based flow above and aren't part of `orchestrate`, but
+remain independently invocable per the "any agent runs independently" design.
+
 ## Running the full autonomous cycle
 
 ```bash
-npm run orchestrate
+npm run orchestrate   # alias: npm run pipeline
 ```
 
-Drives the LangGraph state machine end to end: scan → triage → fan out to every
-open ticket (Developer → Reviewer, retry once on rejection, park on a second
-rejection, hold out of merge on a scope-guard flag) → Deploy on approval → loop
-back to scan → Release once nothing is left auto-retriable. The **only** human
-step is reviewing the PR the Release agent opens at the end — it lists what was
-fixed, what's parked (failed twice — full attempt history attached), and what's
-flagged (scope guard held it out of the merge).
+Drives the LangGraph state machine end to end: scan (Playwright) → triage the
+JSON reports into tickets → sync any pre-existing open Jira tickets → fan out
+to every open ticket (Developer → Reviewer, retry once on rejection, park on a
+second rejection, hold out of merge on a scope-guard flag) → Deploy on approval
+→ loop back to scan → Release once nothing is left auto-retriable. The **only**
+human step is reviewing the PR the Release agent opens at the end — it lists
+what was fixed, what's parked (failed twice — full attempt history attached),
+and what's flagged (scope guard held it out of the merge).
 
 **Known risk, not yet fixed:** the loop currently only routes back to `scan` via
 the `deploy` edge. If a whole wave of tickets ends parked/flagged with none
-deployed, the graph has no path back to `scan` and never reaches `release` —
-and `cycleNumber` is never incremented, so the `MAX_CYCLES` circuit breaker on
-the outer loop can't trigger either. Both need fixing in `orchestrator/graph.ts`
-before a full unattended run is trustworthy.
+deployed, the graph has no path back to `scan` and never reaches `release`.
+There's also no cap on how many times the outer loop can run if triage keeps
+surfacing tickets — needs fixing in `orchestrator/graph.ts` before a full
+unattended run is trustworthy.
 
 ## What's real vs. what needs verification
 
@@ -132,9 +139,10 @@ before a full unattended run is trustworthy.
 src/
   types/, db/, lib/     shared Zod schemas, Drizzle schema/client, exec/notify/config utils
   integrations/         cross-cutting external adapters: jira.ts, github.ts, email.ts, observability.ts
-  scan/                 axe-scan.ts (pure primitive), lighthouse-scan.ts, pa11y-scan.ts,
-                         vision-scan.ts, scanner-agent.ts (merges all four + DB writes)
-  triage/               categorize.ts, triage-agent.ts
+  scan/                 axe-scan.ts (pure primitive), pa11y-scan.ts, vision-scan.ts,
+                         scanner-agent.ts (DB-only path), tests/ (Playwright specs → a11y-reports/*.json)
+  triage/               categorize.ts, triage-agent.ts (DB path), triage-from-reports.ts +
+                         jira-scanner.ts (report/Jira-sync path used by orchestrate)
   development/          prompt-builder.ts, developer-agent.ts
   review/               scope-guard.ts, test-gate.ts, adversarial-review.ts,
                          ephemeral-preview.ts, reviewer-agent.ts
