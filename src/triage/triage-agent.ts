@@ -1,4 +1,5 @@
 import { eq, and, inArray } from "drizzle-orm";
+import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { issues, tickets } from "../db/schema.js";
 import { createTicketStory } from "../integrations/jira.js";
@@ -15,7 +16,9 @@ export interface TriageResult {
  * per category (not one per issue instance), and merges into an existing open
  * ticket for that category if one is already in flight.
  */
-export async function runTriageAgent(scanRunId: string, epicKey: string | null): Promise<TriageResult> {
+export const runTriageAgent = traceable(_runTriageAgent, { name: "triage-agent", run_type: "chain" });
+
+async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promise<TriageResult> {
   const openIssues = await db.select().from(issues).where(
     and(eq(issues.scanRunId, scanRunId), eq(issues.status, "open")),
   );

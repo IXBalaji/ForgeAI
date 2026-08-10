@@ -1,3 +1,4 @@
+import { traceable } from "langsmith/traceable";
 import { run } from "../lib/exec.js";
 import { REVIEWER_MODEL, REVIEWER_EFFORT } from "../lib/config.js";
 
@@ -7,8 +8,14 @@ const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "master";
  * Adversarial code review — a separate persona/context from the Developer
  * agent, per architecture doc §02: it must not be the same session that
  * wrote the fix. Returns a concern string if it found one, or null for LGTM.
+ *
+ * traceable so this model call (not LangChain-native, so invisible to
+ * LangSmith's automatic LangGraph tracing) shows up nested under the
+ * Reviewer node's run with its full diff-in/verdict-out.
  */
-export async function adversarialReview(worktreeDir: string): Promise<string | null> {
+export const adversarialReview = traceable(_adversarialReview, { name: "adversarial-review-sdk-call", run_type: "llm" });
+
+async function _adversarialReview(worktreeDir: string): Promise<string | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
 
   try {

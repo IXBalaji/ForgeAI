@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { inArray, and, eq } from "drizzle-orm";
+import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { tickets, iterationCycles } from "../db/schema.js";
 import { openPullRequest } from "../integrations/github.js";
@@ -16,7 +17,9 @@ const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "master";
  * compiles fixed/parked/flagged into one report so the reviewer sees every
  * exception in one place, per architecture doc §01/§06. Never merges.
  */
-export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
+export const runReleaseAgent = traceable(_runReleaseAgent, { name: "release-agent", run_type: "chain" });
+
+async function _runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
   const [cycle] = await db.select().from(iterationCycles).where(eq(iterationCycles.id, cycleId));
   const epicKey = cycle?.epicKey ?? null;
 

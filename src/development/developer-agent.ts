@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
+import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { tickets, fixAttempts } from "../db/schema.js";
 import { run } from "../lib/exec.js";
@@ -38,7 +39,13 @@ async function ensureWorktree(branch: string, worktreeDir: string): Promise<void
   }
 }
 
-async function runAgentWithRetry(prompt: string, worktreeDir: string): Promise<void> {
+// traceable so the actual model interaction shows up in LangSmith with its
+// full prompt/response — the Claude Agent SDK isn't LangChain-native, so
+// LangSmith's automatic LangGraph tracing has no visibility into this call
+// on its own.
+const runAgentWithRetry = traceable(_runAgentWithRetry, { name: "developer-agent-sdk-call", run_type: "llm" });
+
+async function _runAgentWithRetry(prompt: string, worktreeDir: string): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.warn("[developer] ANTHROPIC_API_KEY not set — skipping the actual fix, worktree left in place.");
     return;
@@ -78,7 +85,9 @@ async function runAgentWithRetry(prompt: string, worktreeDir: string): Promise<v
   console.warn(`[developer] Agent call failed after ${MAX_RETRIES + 1} attempts: ${lastErr?.message}`);
 }
 
-export async function runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
+export const runDeveloperAgent = traceable(_runDeveloperAgent, { name: "developer-agent", run_type: "chain" });
+
+async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   if (!TARGET_REPO_PATH) throw new Error("TARGET_REPO_PATH is not set.");
 
   const existingAttempts = await db

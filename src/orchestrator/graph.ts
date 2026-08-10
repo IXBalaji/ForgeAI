@@ -29,6 +29,7 @@ import { runDeployAgent } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
 import { ensureEpic } from "../integrations/jira.js";
 import { withSpan } from "../integrations/observability.js";
+import { traceable } from "langsmith/traceable";
 
 const MAX_CYCLES = 20; // circuit breaker on the outer loop itself
 
@@ -132,7 +133,15 @@ export function buildGraph() {
   return graph;
 }
 
-export async function runOrchestratorCycle() {
+// traceable at the top of the whole cycle so it's the one LangSmith root run
+// for this invocation — every agent below is independently traceable() too,
+// and traceable's context propagation (plain async-call-chain based, not
+// LangGraph's own callback system) means they all nest under this root
+// automatically, regardless of whether LangGraph's internal tracing bridges
+// to LangSmith on its own.
+export const runOrchestratorCycle = traceable(_runOrchestratorCycle, { name: "orchestrator-cycle", run_type: "chain" });
+
+async function _runOrchestratorCycle() {
   const { initObservability } = await import("../integrations/observability.js");
   await initObservability();
 

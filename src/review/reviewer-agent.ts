@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { join } from "node:path";
 import { eq, inArray } from "drizzle-orm";
+import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { fixAttempts, tickets, issues, reviewResults } from "../db/schema.js";
 import { run } from "../lib/exec.js";
@@ -19,7 +20,9 @@ export interface ReviewerVerdict {
   scopeGuardFlagged: boolean;
 }
 
-export async function runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict> {
+export const runReviewerAgent = traceable(_runReviewerAgent, { name: "reviewer-agent", run_type: "chain" });
+
+async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict> {
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
   if (!attempt) throw new Error(`FixAttempt ${fixAttemptId} not found`);
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, attempt.ticketId));

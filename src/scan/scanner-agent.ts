@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { chromium } from "playwright";
+import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { scanRuns, issues } from "../db/schema.js";
 import type { Severity } from "../types/index.js";
@@ -89,7 +90,9 @@ function runAllSources(baseUrl: string, routes: string[], storageState?: object)
  * is logged in and its routes are scanned separately, with all findings
  * merged and deduped by fingerprint.
  */
-export async function runScannerAgent(opts: ScannerOptions): Promise<ScannerResult> {
+export const runScannerAgent = traceable(_runScannerAgent, { name: "scanner-agent", run_type: "chain" });
+
+async function _runScannerAgent(opts: ScannerOptions): Promise<ScannerResult> {
   const [{ id: scanRunId }] = await db
     .insert(scanRuns)
     .values({

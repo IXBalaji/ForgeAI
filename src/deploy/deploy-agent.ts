@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { eq } from "drizzle-orm";
+import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { fixAttempts, tickets, deployments } from "../db/schema.js";
 import { mergePullRequest, createTag } from "../integrations/github.js";
@@ -24,7 +25,9 @@ export interface DeployResult {
  * rollback — per architecture doc §06: "redeploy the last-good tag" instead
  * of a git-archaeology exercise.
  */
-export async function runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
+export const runDeployAgent = traceable(_runDeployAgent, { name: "deploy-agent", run_type: "chain" });
+
+async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
   if (!attempt) throw new Error(`FixAttempt ${fixAttemptId} not found`);
 

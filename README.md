@@ -41,6 +41,7 @@ Fill in `.env`:
 | `GITHUB_*` | Developer agent's PR, Deploy agent's merge + rollback tag, Release agent's final PR |
 | `SLACK_WEBHOOK_URL`, `SENDGRID_API_KEY`/`EMAIL_*` | Release agent's notification — without either, the report just prints to console |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | optional — leave unset to trace to the console only |
+| `LANGSMITH_TRACING_V2`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT` | optional — LangSmith tracing of every agent end to end (scan/triage/developer/reviewer/deploy/release are all `traceable()`-wrapped, plus the two Claude Agent SDK model calls) |
 
 This deployment uses a **local PostgreSQL server** (not Docker) — a dedicated
 database, separate from the target app's own database:
