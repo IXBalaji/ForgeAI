@@ -2,7 +2,8 @@ import { eq, and, inArray } from "drizzle-orm";
 import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { issues, tickets } from "../db/schema.js";
-import { createTicketStory } from "../integrations/jira.js";
+import { createTriagedTicket } from "../integrations/jira.js";
+import { LABEL_PREFIX } from "../lib/config.js";
 import { categorize } from "./categorize.js";
 
 export interface TriageResult {
@@ -48,12 +49,91 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
       const severityCounts: Record<string, number> = {};
       for (const i of categoryIssues) severityCounts[i.severity] = (severityCounts[i.severity] ?? 0) + 1;
 
-      const jiraKey = await createTicketStory({
-        epicKey,
-        category,
-        severityCounts,
-        issueCount: categoryIssues.length,
-      });
+      const highestSeverity = (["critical", "serious", "moderate", "minor"] as const)
+        .find((s) => severityCounts[s]) ?? "moderate";
+      const priorityMap: Record<string, string> = { critical: "P1", serious: "P2", moderate: "P3", minor: "P4" };
+
+      const affectedPages = [...new Set(categoryIssues.map((i) => i.pageUrl))];
+      const selectors = categoryIssues.slice(0, 10).map((i) => i.selector);
+
+      const adfContent: any[] = [
+        {
+          type: "heading", attrs: { level: 3 },
+          content: [{ type: "text", text: "Summary" }],
+        },
+        {
+          type: "paragraph",
+          content: [
+            { type: "text", text: `${categoryIssues.length} instance(s) of ` },
+            { type: "text", text: category, marks: [{ type: "strong" }] },
+            { type: "text", text: ` found across ${affectedPages.length} page(s).` },
+          ],
+        },
+        {
+          type: "heading", attrs: { level: 3 },
+          content: [{ type: "text", text: "Severity Breakdown" }],
+        },
+        {
+          type: "table", attrs: { layout: "default" },
+          content: [
+            {
+              type: "tableRow",
+              content: [
+                { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Severity" }] }] },
+                { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Count" }] }] },
+              ],
+            },
+            ...Object.entries(severityCounts).map(([sev, count]) => ({
+              type: "tableRow",
+              content: [
+                { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: sev }] }] },
+                { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: String(count) }] }] },
+              ],
+            })),
+          ],
+        },
+        {
+          type: "heading", attrs: { level: 3 },
+          content: [{ type: "text", text: "Affected Pages" }],
+        },
+        {
+          type: "bulletList",
+          content: affectedPages.slice(0, 20).map((url) => ({
+            type: "listItem",
+            content: [{ type: "paragraph", content: [{ type: "text", text: url }] }],
+          })),
+        },
+        {
+          type: "heading", attrs: { level: 3 },
+          content: [{ type: "text", text: "Example Selectors" }],
+        },
+        {
+          type: "codeBlock", attrs: { language: "css" },
+          content: [{ type: "text", text: selectors.join("\n") }],
+        },
+      ];
+
+      if (categoryIssues.length > 10) {
+        adfContent.push({
+          type: "paragraph",
+          content: [{ type: "text", text: `…and ${categoryIssues.length - 10} more selector(s).`, marks: [{ type: "em" }] }],
+        });
+      }
+
+      const wcagRules = [...new Set(categoryIssues.map((i) => i.wcagRule))];
+
+      let jiraKey: string | null = null;
+      try {
+        jiraKey = await createTriagedTicket({
+          epicKey,
+          summary: `[${LABEL_PREFIX}] ${category}`,
+          description: { type: "doc", version: 1, content: adfContent },
+          labels: [LABEL_PREFIX, ...wcagRules.map((r) => `a11y:${r}`)],
+          priority: priorityMap[highestSeverity],
+        });
+      } catch (err) {
+        console.warn(`[triage] Failed to create Jira ticket for "${category}" — continuing locally:`, (err as Error).message);
+      }
 
       await db.insert(tickets).values({
         jiraKey,

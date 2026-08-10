@@ -4,9 +4,9 @@ import { Command } from "commander";
 import { runScannerAgent, type AuthRole } from "../scan/scanner-agent.js";
 import { runTriageAgent } from "../triage/triage-agent.js";
 import { triageFromReports } from "../triage/triage-from-reports.js";
-import { runDeveloperAgent } from "../development/developer-agent.js";
-import { runReviewerAgent } from "../review/reviewer-agent.js";
-import { runDeployAgent } from "../deploy/deploy-agent.js";
+import { runDeveloperAgent, type DeveloperResult } from "../development/developer-agent.js";
+import { runReviewerAgent, type ReviewerVerdict } from "../review/reviewer-agent.js";
+import { runDeployAgent, type DeployResult } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
 import { ensureEpic } from "../integrations/jira.js";
 import { runOrchestratorCycle } from "../orchestrator/graph.js";
@@ -159,17 +159,19 @@ program
     const maxRetries = 2;
     console.log(`[fix:all] Found ${openTickets.length} open ticket(s)`);
     for (const ticket of openTickets) {
-      console.log(`[fix:all] Processing ticket ${ticket.id} (${ticket.jiraKey ?? "no jira key"})`);
+      console.log(`\n[fix:all] ── Ticket ${ticket.id} (${ticket.jiraKey ?? "no jira key"}) ──`);
+
+      // Stage 1: Developer agent
+      let devResult: DeveloperResult | null = null;
       let succeeded = false;
       for (let retry = 0; retry <= maxRetries && !succeeded; retry++) {
         try {
-          if (retry > 0) console.log(`[fix:all] Retrying ticket ${ticket.id} (attempt ${retry + 1}/${maxRetries + 1})`);
-          const result = await withSpan("agent.developer", () => runDeveloperAgent(ticket.id));
-          console.log(JSON.stringify(result, null, 2));
+          if (retry > 0) console.log(`[fix:all] Retrying developer agent (attempt ${retry + 1}/${maxRetries + 1})`);
+          devResult = await withSpan("agent.developer", () => runDeveloperAgent(ticket.id));
+          console.log(`[fix:all] Developer done:`, JSON.stringify(devResult, null, 2));
           succeeded = true;
         } catch (err) {
-          const msg = (err as Error).message;
-          console.error(`[fix:all] Failed on ticket ${ticket.id}: ${msg}`);
+          console.error(`[fix:all] Developer failed: ${(err as Error).message}`);
           if (retry < maxRetries) {
             const delay = Math.min(2000 * 2 ** retry, 15000);
             console.log(`[fix:all] Waiting ${delay / 1000}s before retry...`);
@@ -177,7 +179,92 @@ program
           }
         }
       }
-      if (!succeeded) console.error(`[fix:all] Gave up on ticket ${ticket.id} after ${maxRetries + 1} attempts`);
+      if (!succeeded || !devResult) {
+        console.error(`[fix:all] Gave up on ticket ${ticket.id} after ${maxRetries + 1} developer attempts`);
+        continue;
+      }
+
+      // Stage 2: Reviewer agent
+      let reviewResult: ReviewerVerdict | null = null;
+      try {
+        console.log(`[fix:all] Running reviewer on fix attempt ${devResult.fixAttemptId}...`);
+        reviewResult = await withSpan("agent.reviewer", () => runReviewerAgent(devResult!.fixAttemptId));
+        console.log(`[fix:all] Reviewer verdict:`, JSON.stringify(reviewResult, null, 2));
+      } catch (err) {
+        console.error(`[fix:all] Reviewer failed: ${(err as Error).message}`);
+        continue;
+      }
+
+      if (reviewResult.verdict !== "approved") {
+        console.log(`[fix:all] Reviewer rejected — skipping deploy for ticket ${ticket.id}`);
+        continue;
+      }
+      if (reviewResult.scopeGuardFlagged) {
+        console.log(`[fix:all] Scope guard flagged — holding ticket ${ticket.id} for manual review`);
+        continue;
+      }
+
+      // Stage 3: Deploy agent (merge PR + tag)
+      try {
+        console.log(`[fix:all] Running deploy on fix attempt ${devResult.fixAttemptId}...`);
+        const deployResult: DeployResult = await withSpan("agent.deploy", () => runDeployAgent(devResult!.fixAttemptId));
+        console.log(`[fix:all] Deploy done:`, JSON.stringify(deployResult, null, 2));
+      } catch (err) {
+        console.error(`[fix:all] Deploy failed: ${(err as Error).message}`);
+      }
+    }
+  });
+
+program
+  .command("review:deploy")
+  .description("Re-review all existing fix attempts that have PRs and deploy approved ones (skips developer agent)")
+  .option("--limit <n>", "max attempts to process", "10")
+  .action(async (opts) => {
+    const { eq, isNotNull, sql } = await import("drizzle-orm");
+    const { fixAttempts, tickets } = await import("../db/schema.js");
+    const attempts = await db
+      .select()
+      .from(fixAttempts)
+      .where(isNotNull(fixAttempts.prUrl))
+      .limit(parseInt(opts.limit));
+
+    if (attempts.length === 0) {
+      console.log("[review:deploy] No fix attempts with PRs found");
+      return;
+    }
+
+    console.log(`[review:deploy] Found ${attempts.length} fix attempt(s) with PRs`);
+    for (const attempt of attempts) {
+      console.log(`\n[review:deploy] ── Attempt ${attempt.id} (branch: ${attempt.branch}) ──`);
+
+      // Stage 1: Reviewer
+      let reviewResult: ReviewerVerdict | null = null;
+      try {
+        console.log(`[review:deploy] Running reviewer...`);
+        reviewResult = await withSpan("agent.reviewer", () => runReviewerAgent(attempt.id));
+        console.log(`[review:deploy] Reviewer verdict:`, JSON.stringify(reviewResult, null, 2));
+      } catch (err) {
+        console.error(`[review:deploy] Reviewer failed: ${(err as Error).message}`);
+        continue;
+      }
+
+      if (reviewResult.verdict !== "approved") {
+        console.log(`[review:deploy] Reviewer rejected — skipping deploy`);
+        continue;
+      }
+      if (reviewResult.scopeGuardFlagged) {
+        console.log(`[review:deploy] Scope guard flagged — holding for manual review`);
+        continue;
+      }
+
+      // Stage 2: Deploy
+      try {
+        console.log(`[review:deploy] Running deploy...`);
+        const deployResult: DeployResult = await withSpan("agent.deploy", () => runDeployAgent(attempt.id));
+        console.log(`[review:deploy] Deploy done:`, JSON.stringify(deployResult, null, 2));
+      } catch (err) {
+        console.error(`[review:deploy] Deploy failed: ${(err as Error).message}`);
+      }
     }
   });
 

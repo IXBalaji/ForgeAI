@@ -19,6 +19,7 @@
     "release": "tsx src/cli/index.ts release",
     "sync:jira": "tsx src/cli/index.ts sync:jira",
     "fix:all": "tsx src/cli/index.ts fix:all",
+    "review:deploy": "tsx src/cli/index.ts review:deploy",
     "pipeline": "tsx src/cli/index.ts orchestrate",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",

@@ -4,6 +4,7 @@ import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { fixAttempts, tickets, deployments } from "../db/schema.js";
 import { mergePullRequest, createTag } from "../integrations/github.js";
+import { transitionTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
 
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
@@ -61,6 +62,11 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
     .returning();
 
   await db.update(tickets).set({ status: "done" }).where(eq(tickets.id, attempt.ticketId));
+
+  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, attempt.ticketId));
+  if (ticket?.jiraKey) {
+    await transitionTicket(ticket.jiraKey, "In Review");
+  }
 
   return { deploymentId: deployment.id, commitSha, tag };
 }

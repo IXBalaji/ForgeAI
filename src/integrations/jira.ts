@@ -4,7 +4,14 @@ import { LABEL_PREFIX, JIRA_PROJECT_KEY } from "../lib/config.js";
 import { db } from "../db/client.js";
 import { iterationCycles } from "../db/schema.js";
 
+const JIRA_SUMMARY_MAX = 255;
+
 const { JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;
+
+function truncateSummary(summary: string): string {
+  if (summary.length <= JIRA_SUMMARY_MAX) return summary;
+  return summary.slice(0, JIRA_SUMMARY_MAX - 1) + "…";
+}
 
 export function isJiraConfigured(): boolean {
   return Boolean(JIRA_BASE_URL && JIRA_EMAIL && JIRA_API_TOKEN);
@@ -52,7 +59,7 @@ export async function ensureEpic(cycleId: string): Promise<string | null> {
     body: JSON.stringify({
       fields: {
         project: { key: JIRA_PROJECT_KEY },
-        summary: `[${LABEL_PREFIX}] Accessibility remediation cycle ${cycleId}`,
+        summary: truncateSummary(`[${LABEL_PREFIX}] Accessibility remediation cycle ${cycleId}`),
         issuetype: { name: "Epic" },
       },
     }),
@@ -86,7 +93,7 @@ export async function createTicketStory(params: {
     body: JSON.stringify({
       fields: {
         project: { key: JIRA_PROJECT_KEY },
-        summary: `[${LABEL_PREFIX}] ${params.category}`,
+        summary: truncateSummary(`[${LABEL_PREFIX}] ${params.category}`),
         description: {
           type: "doc",
           version: 1,
@@ -117,7 +124,7 @@ export async function createTriagedTicket(params: {
 
   const fields: Record<string, any> = {
     project: { key: JIRA_PROJECT_KEY },
-    summary: params.summary,
+    summary: truncateSummary(params.summary),
     description: params.description,
     issuetype: { name: "Task" },
     labels: params.labels,

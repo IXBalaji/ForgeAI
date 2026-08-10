@@ -6,6 +6,7 @@ import { db } from "../db/client.js";
 import { tickets, fixAttempts } from "../db/schema.js";
 import { run } from "../lib/exec.js";
 import { openPullRequest } from "../integrations/github.js";
+import { transitionTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX, LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT } from "../lib/config.js";
 import { buildPrompt } from "./prompt-builder.js";
 
@@ -90,6 +91,11 @@ export const runDeveloperAgent = traceable(_runDeveloperAgent, { name: "develope
 async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   if (!TARGET_REPO_PATH) throw new Error("TARGET_REPO_PATH is not set.");
 
+  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+  if (ticket?.jiraKey) {
+    await transitionTicket(ticket.jiraKey, "In Progress");
+  }
+
   const existingAttempts = await db
     .select()
     .from(fixAttempts)
@@ -112,22 +118,33 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     await run("git", ["commit", "-m", `fix(${LABEL_PREFIX_SLUG}): ${branch}`], worktreeDir);
     const { stdout } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
     commitSha = stdout.trim();
-    if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-      const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
-      await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
-    }
-    await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
-
-    const pr = await openPullRequest({
-      head: branch,
-      base: QA_BRANCH,
-      title: `[${LABEL_PREFIX}] Fix: ${branch}`,
-      body: `Automated accessibility fix for ticket ${ticketId} (attempt ${attemptNumber}).`,
-      draft: true,
-    });
-    prUrl = pr?.url ?? null;
   } catch (err) {
-    console.warn("[developer] Nothing to commit or push failed — likely no changes were made.", err);
+    console.warn("[developer] Nothing to commit — likely no changes were made.", err);
+  }
+
+  if (commitSha) {
+    try {
+      if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+        const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+        await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
+      }
+      await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
+    } catch (err) {
+      console.warn("[developer] Push failed.", err);
+    }
+
+    try {
+      const pr = await openPullRequest({
+        head: branch,
+        base: QA_BRANCH,
+        title: `[${LABEL_PREFIX}] Fix: ${branch}`,
+        body: `Automated accessibility fix for ticket ${ticketId} (attempt ${attemptNumber}).`,
+        draft: true,
+      });
+      prUrl = pr?.url ?? null;
+    } catch (err) {
+      console.warn("[developer] PR creation failed.", err);
+    }
   }
 
   try {

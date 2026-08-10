@@ -47,11 +47,33 @@ export async function openPullRequest(params: {
   return { url: pr.html_url, number: pr.number };
 }
 
+async function markPullRequestReady(prNumber: number): Promise<void> {
+  if (!isGitHubConfigured()) return;
+  const pr = await ghFetch(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls/${prNumber}`);
+  if (!pr.draft) return;
+
+  const nodeId = pr.node_id;
+  const res = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${GITHUB_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      query: `mutation { markPullRequestReadyForReview(input: { pullRequestId: "${nodeId}" }) { pullRequest { isDraft } } }`,
+    }),
+  });
+  if (!res.ok) {
+    console.warn(`[github] Failed to mark PR #${prNumber} as ready: ${res.status}`);
+  }
+}
+
 export async function mergePullRequest(prNumber: number, mergeMethod: "squash" | "merge" = "squash"): Promise<string | null> {
   if (!isGitHubConfigured()) {
     console.warn(`[github] GitHub not configured — PR #${prNumber} was not merged.`);
     return null;
   }
+  await markPullRequestReady(prNumber);
   const result = await ghFetch(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/pulls/${prNumber}/merge`, {
     method: "PUT",
     body: JSON.stringify({ merge_method: mergeMethod }),

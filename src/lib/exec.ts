@@ -17,8 +17,9 @@ export async function run(cmd: string, args: string[], cwd: string): Promise<Exe
   if (!existsSync(cwd)) {
     throw new Error(`cwd "${cwd}" does not exist — check TARGET_REPO_PATH (or the worktree dir) in .env.`);
   }
+  const useShell = process.platform === "win32" && /^(npm|npx|pnpm|yarn)$/i.test(cmd);
   try {
-    const { stdout, stderr } = await execFileAsync(cmd, args, { cwd, maxBuffer: 1024 * 1024 * 32 });
+    const { stdout, stderr } = await execFileAsync(cmd, args, { cwd, maxBuffer: 1024 * 1024 * 32, shell: useShell });
     return { stdout, stderr };
   } catch (err: any) {
     if (err.code === "ENOENT") {
