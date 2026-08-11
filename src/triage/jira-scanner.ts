@@ -57,6 +57,10 @@ export async function syncJiraTickets(opts: {
 
     try {
       const parsed = parseJiraIssue(jiraIssue);
+      console.log(`[sync:jira] Parsed ${jiraKey}: ruleId="${parsed.ruleId}", impact="${parsed.impact}", pages=${parsed.pages.length}`);
+      for (const page of parsed.pages) {
+        console.log(`[sync:jira]   page: ${page.url} — ${page.selectors.length} selector(s)`);
+      }
       const issueIds: string[] = [];
 
       for (const page of parsed.pages) {
@@ -80,7 +84,19 @@ export async function syncJiraTickets(opts: {
             .onConflictDoNothing()
             .returning();
 
-          if (inserted) issueIds.push(inserted.id);
+          if (inserted) {
+            issueIds.push(inserted.id);
+          } else {
+            const [existing] = await db
+              .select({ id: issues.id })
+              .from(issues)
+              .where(eq(issues.fingerprint, fingerprint))
+              .limit(1);
+            if (existing) {
+              issueIds.push(existing.id);
+              console.log(`[sync:jira]   reusing existing issue ${existing.id} (fingerprint: ${fingerprint.slice(0, 8)})`);
+            }
+          }
         }
       }
 

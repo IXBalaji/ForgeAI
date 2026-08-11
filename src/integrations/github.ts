@@ -94,6 +94,22 @@ export async function mergeBranch(head: string, base: string, commitMessage: str
 }
 
 /**
+ * Merges the base branch into the head branch to bring it up to date —
+ * used by the deploy agent to resolve conflicts before retrying a merge.
+ */
+export async function updateBranchFromBase(head: string, base: string): Promise<string | null> {
+  if (!isGitHubConfigured()) {
+    console.warn(`[github] GitHub not configured — branch "${head}" was not updated from "${base}".`);
+    return null;
+  }
+  const result = await ghFetch(`/repos/${GITHUB_OWNER}/${GITHUB_REPO}/merges`, {
+    method: "POST",
+    body: JSON.stringify({ base: head, head: base, commit_message: `chore: merge ${base} into ${head} to resolve conflicts` }),
+  });
+  return result?.sha ?? null;
+}
+
+/**
  * Creates a lightweight tag pointing at commitSha via the Git References API —
  * this is the rollback mechanism from the guardrails doc: "redeploy the last-
  * good tag" instead of a git-archaeology exercise. Uses the API rather than a

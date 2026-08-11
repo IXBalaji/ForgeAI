@@ -26,15 +26,19 @@ export interface DeveloperResult {
 }
 
 async function ensureWorktree(branch: string, worktreeDir: string): Promise<void> {
+  // Always base the worktree on origin/<qa> so we start from the latest remote
+  // state — using a local branch ref can be stale if a previous deploy merged
+  // into qa remotely but we never pulled.
+  const startPoint = `origin/${QA_BRANCH}`;
   try {
-    await run("git", ["worktree", "add", "-b", branch, worktreeDir, BASE_BRANCH], TARGET_REPO_PATH);
+    await run("git", ["worktree", "add", "-b", branch, worktreeDir, startPoint], TARGET_REPO_PATH);
   } catch (err) {
     const msg = (err as Error).message;
     if (msg.includes("already exists")) {
       console.warn(`[developer] Branch/worktree "${branch}" already exists — cleaning up and retrying.`);
       try { await run("git", ["worktree", "remove", worktreeDir, "--force"], TARGET_REPO_PATH); } catch { /* may not exist on disk */ }
       try { await run("git", ["branch", "-D", branch], TARGET_REPO_PATH); } catch { /* may not exist */ }
-      await run("git", ["worktree", "add", "-b", branch, worktreeDir, BASE_BRANCH], TARGET_REPO_PATH);
+      await run("git", ["worktree", "add", "-b", branch, worktreeDir, startPoint], TARGET_REPO_PATH);
     } else {
       throw err;
     }
@@ -118,12 +122,21 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   }
 
   // Early exit if the ticket has no resolvable issues — avoids wasting 5+ min on an empty SDK call
-  const ticketIssues = await db
-    .select()
-    .from(issues)
-    .where(inArray(issues.id, (ticket?.issueIds as string[]) ?? []));
+  const rawIssueIds = (ticket?.issueIds as string[]) ?? [];
+  const ticketIssues = rawIssueIds.length > 0
+    ? await db.select().from(issues).where(inArray(issues.id, rawIssueIds))
+    : [];
   if (ticketIssues.length === 0) {
     console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping SDK agent.`);
+    console.warn(`[developer]   ticket.issueIds (${rawIssueIds.length}): ${JSON.stringify(rawIssueIds)}`);
+    console.warn(`[developer]   issues found in DB: ${ticketIssues.length}`);
+    if (rawIssueIds.length > 0) {
+      console.warn(`[developer]   ⚠ The issueIds exist on the ticket but no matching rows were found in the issues table.`);
+      console.warn(`[developer]   This usually means: (a) issues were created in a different scan run that was deleted,`);
+      console.warn(`[developer]   (b) the triage step stored stale/incorrect issueIds, or (c) the issues table was truncated.`);
+    } else {
+      console.warn(`[developer]   ⚠ The ticket has an empty issueIds array — triage may not have linked any issues to it.`);
+    }
     if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     const cleanupLock = await gitRepoMutex.acquire();

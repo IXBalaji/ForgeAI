@@ -114,6 +114,16 @@ program
   });
 
 program
+  .command("resolve-conflicts")
+  .description("Run the conflict resolver against one fix attempt — pulls QA, resolves conflicts with AI, pushes back")
+  .requiredOption("--attempt <id>", "fix attempt id")
+  .action(async (opts) => {
+    const { resolveConflicts } = await import("../deploy/conflict-resolver.js");
+    const result = await withSpan("agent.conflict-resolver", () => resolveConflicts(opts.attempt));
+    console.log(JSON.stringify(result, null, 2));
+  });
+
+program
   .command("release")
   .description("Run the Release agent — open the single end-of-cycle PR + report")
   .requiredOption("--cycle <id>", "iteration cycle id")
@@ -156,10 +166,27 @@ program
       return;
     }
 
+    const { issues } = await import("../db/schema.js");
     const maxRetries = 2;
-    console.log(`[fix:all] Found ${openTickets.length} open ticket(s)`);
+    console.log(`[fix:all] Found ${openTickets.length} open ticket(s)\n`);
     for (const ticket of openTickets) {
-      console.log(`\n[fix:all] ── Ticket ${ticket.id} (${ticket.jiraKey ?? "no jira key"}) ──`);
+      const issueIds = (ticket.issueIds as string[]) ?? [];
+      const resolvedIssues = issueIds.length > 0
+        ? await db.select().from(issues).where(inArray(issues.id, issueIds))
+        : [];
+      console.log(`[fix:all] ── Ticket ${ticket.id} (${ticket.jiraKey ?? "no jira key"}) ──`);
+      console.log(`[fix:all]   category: ${ticket.category}`);
+      console.log(`[fix:all]   status: ${ticket.status}`);
+      console.log(`[fix:all]   issueIds: ${issueIds.length} stored, ${resolvedIssues.length} found in DB`);
+      if (resolvedIssues.length > 0) {
+        for (const iss of resolvedIssues) {
+          console.log(`[fix:all]     - ${iss.wcagRule} | "${iss.selector}" | ${iss.pageUrl} (${iss.severity})`);
+        }
+      } else if (issueIds.length > 0) {
+        console.log(`[fix:all]   ⚠ issueIds reference missing rows: ${JSON.stringify(issueIds.slice(0, 5))}${issueIds.length > 5 ? "..." : ""}`);
+      } else {
+        console.log(`[fix:all]   ⚠ ticket has empty issueIds array`);
+      }
 
       // Stage 1: Developer agent
       let devResult: DeveloperResult | null = null;
@@ -271,6 +298,35 @@ program
         console.error(`[review:deploy] Deploy failed: ${(err as Error).message}`);
       }
     }
+  });
+
+program
+  .command("scan:rules")
+  .description("List WCAG 2.2 criteria and their axe-core rules, showing which are attached/detached")
+  .option("--level <level>", "filter by WCAG level (A or AA)", "AA")
+  .option("--owner <owner>", "filter by owner (UX/UI, Frontend, Shared)")
+  .option("--detached", "show only detached criteria")
+  .action(async (opts) => {
+    const { WCAG_REGISTRY } = await import("../scan/wcag-rules.js");
+    const { resolveAxeConfig } = await import("../scan/scan-config.js");
+    const resolved = resolveAxeConfig();
+
+    let criteria = WCAG_REGISTRY;
+    if (opts.level === "A") criteria = criteria.filter((c) => c.level === "A");
+    if (opts.owner) criteria = criteria.filter((c) => c.owner === opts.owner || c.owner === "Shared");
+    if (opts.detached) criteria = criteria.filter((c) => !c.enabled);
+
+    console.log(`\nWCAG 2.2 Level ${opts.level} — ${criteria.length} criteria\n`);
+    console.log("Status   | WCAG   | Level | Owner    | Name                                    | Axe Rules");
+    console.log("-".repeat(120));
+    for (const c of criteria) {
+      const status = c.enabled ? "ATTACHED" : "DETACHED";
+      const rules = c.axeRules.length > 0 ? c.axeRules.join(", ") : "(manual only)";
+      console.log(
+        `${status.padEnd(8)} | ${c.id.padEnd(6)} | ${c.level.padEnd(5)} | ${c.owner.padEnd(8)} | ${c.name.padEnd(39)} | ${rules}`,
+      );
+    }
+    console.log(`\n${resolved.enabledRules.length} axe rules active, ${resolved.disabledRules.length} disabled\n`);
   });
 
 program

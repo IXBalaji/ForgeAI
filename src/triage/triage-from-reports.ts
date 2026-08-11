@@ -95,6 +95,19 @@ export async function triageFromReports(opts: {
     let jiraKey: string | null = null;
     if (!opts.dryRun) {
       const category = categorize(payload.classified.ruleId);
+
+      // Skip categories that were already fixed in this cycle — avoids
+      // re-creating tickets for issues the scan still reports because CI/CD
+      // hasn't deployed the merged code yet.
+      const [recentlyDone] = await db
+        .select()
+        .from(ticketsTable)
+        .where(and(eq(ticketsTable.category, category), eq(ticketsTable.status, "done")));
+      if (recentlyDone) {
+        console.log(`[triage] Skipping category "${category}" — ticket ${recentlyDone.jiraKey ?? recentlyDone.id} was already marked done`);
+        continue;
+      }
+
       const [existingForJira] = await db
         .select()
         .from(ticketsTable)
@@ -157,6 +170,16 @@ export async function triageFromReports(opts: {
             if (inserted) {
               issueIds.push(inserted.id);
               dbIssuesCreated++;
+            } else {
+              const [existing] = await db
+                .select({ id: issues.id })
+                .from(issues)
+                .where(eq(issues.fingerprint, fingerprint))
+                .limit(1);
+              if (existing) {
+                issueIds.push(existing.id);
+                console.log(`[triage] Reusing existing issue ${existing.id} for fingerprint ${fingerprint.slice(0, 8)}`);
+              }
             }
           } catch (err) {
             console.warn(`[triage] Skipped duplicate issue: ${fingerprint.slice(0, 8)}`);
@@ -172,7 +195,7 @@ export async function triageFromReports(opts: {
       if (existingTicket) {
         const mergedIds = [...new Set([...(existingTicket.issueIds as string[]), ...issueIds])];
         await db.update(ticketsTable).set({ issueIds: mergedIds }).where(eq(ticketsTable.id, existingTicket.id));
-        console.log(`[triage] Merged ${issueIds.length} issue(s) into existing ticket ${existingTicket.jiraKey ?? existingTicket.id} (category: ${category})`);
+        console.log(`[triage] Merged ${issueIds.length} issue(s) into existing ticket ${existingTicket.jiraKey ?? existingTicket.id} (category: ${category}, total: ${mergedIds.length})`);
       } else if (issueIds.length > 0 || jiraKey) {
         await db.insert(ticketsTable).values({
           jiraKey,
@@ -182,6 +205,10 @@ export async function triageFromReports(opts: {
           status: "open",
         });
         dbTicketsCreated++;
+        console.log(`[triage] Created ticket for "${category}" — jiraKey: ${jiraKey}, issueIds: ${issueIds.length}`);
+        if (issueIds.length === 0) {
+          console.warn(`[triage] ⚠ Ticket "${category}" (${jiraKey}) created with 0 issueIds — the developer agent will skip it.`);
+        }
       }
     } else {
       console.log(`[triage] [dry-run] Would create: ${payload.summary}`);

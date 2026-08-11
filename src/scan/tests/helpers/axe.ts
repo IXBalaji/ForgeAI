@@ -2,7 +2,7 @@ import { Page, TestInfo } from "@playwright/test";
 import { AxeBuilder } from "@axe-core/playwright";
 import fs from "fs";
 import path from "path";
-import { DEFAULT_AXE_TAGS } from "../../axe-scan.js";
+import { resolveAxeConfig } from "../../scan-config.js";
 
 export const REPORT_DIR = path.join(process.cwd(), "a11y-reports");
 
@@ -10,7 +10,8 @@ export function ensureReportDir() {
   fs.mkdirSync(REPORT_DIR, { recursive: true });
 }
 
-export const AXE_TAGS: string[] = [...DEFAULT_AXE_TAGS];
+const _resolved = resolveAxeConfig();
+export const AXE_TAGS: string[] = _resolved.tags;
 
 export async function runAxeScan(
   page: Page,
@@ -25,6 +26,14 @@ export async function runAxeScan(
   let builder = new AxeBuilder({ page });
   if (options.tags) builder = builder.withTags(options.tags);
   if (options.rules) builder = builder.withRules(options.rules);
+
+  if (_resolved.enabledRules.length > 0) {
+    builder = builder.withRules(_resolved.enabledRules);
+  }
+  if (_resolved.disabledRules.length > 0) {
+    builder = builder.disableRules(_resolved.disabledRules);
+  }
+
   const results = await builder.analyze();
 
   const jsonPath = path.join(REPORT_DIR, `${options.fileSlug}.json`);

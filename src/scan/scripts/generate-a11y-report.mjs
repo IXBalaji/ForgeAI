@@ -7,6 +7,17 @@ const htmlPath = path.join(REPORT_DIR, "index.html");
 const impactRank = { critical: 0, serious: 1, moderate: 2, minor: 3 };
 const impactColor = { critical: "#b3261e", serious: "#d93025", moderate: "#e37400", minor: "#9e9e00" };
 
+function parseWcagTags(tags) {
+  const results = [];
+  for (const tag of tags || []) {
+    const m = tag.match(/^wcag(\d)(\d)(\d+)$/);
+    if (m) {
+      results.push(`${m[1]}.${m[2]}.${m[3]}`);
+    }
+  }
+  return results;
+}
+
 const escapeHtml = (str) =>
   String(str).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
@@ -59,6 +70,15 @@ const pageSections = pages
           )
           .join("");
 
+        const wcagIds = parseWcagTags(v.tags);
+        const wcagBadges = wcagIds
+          .map((id) => `<span class="wcag-badge">WCAG ${escapeHtml(id)}</span>`)
+          .join("");
+        const axeTagBadges = (v.tags || [])
+          .filter((t) => t === "best-practice" || /^wcag\d+a/.test(t))
+          .map((t) => `<span class="axe-tag">${escapeHtml(t)}</span>`)
+          .join("");
+
         return `
         <details class="violation">
           <summary>
@@ -68,6 +88,7 @@ const pageSections = pages
             <span class="node-count">${v.nodes.length} element${v.nodes.length === 1 ? "" : "s"}</span>
           </summary>
           <div class="violation-body">
+            ${(wcagBadges || axeTagBadges) ? `<div class="wcag-tags">${wcagBadges}${axeTagBadges}</div>` : ""}
             <p class="description">${escapeHtml(v.description)}</p>
             <a class="help-link" href="${v.helpUrl}" target="_blank" rel="noopener noreferrer">View rule documentation &rarr;</a>
             ${nodesHtml}
@@ -123,6 +144,9 @@ const html = `<!doctype html>
   .node-fix { font-size: 0.82rem; color: var(--muted); white-space: pre-line; }
   .toc { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
   .toc a { font-size: 0.82rem; text-decoration: none; color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; }
+  .wcag-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .wcag-badge { font-size: 0.72rem; font-weight: 600; background: #1a73e8; color: white; padding: 2px 7px; border-radius: 4px; }
+  .axe-tag { font-size: 0.72rem; font-weight: 500; background: var(--border); color: var(--fg); padding: 2px 7px; border-radius: 4px; }
 </style>
 </head>
 <body>

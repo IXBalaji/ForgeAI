@@ -59,8 +59,17 @@ const TicketState = Annotation.Root({
   epicKey: Annotation<string | null>,
 });
 
+const DEPLOY_SETTLE_MS = parseInt(process.env.DEPLOY_SETTLE_MS ?? "60000", 10);
+
 async function scanNode(state: typeof CycleState.State) {
   return withSpan("scan.playwright", async () => {
+    // Wait for CI/CD to deploy the merged code before rescanning — without
+    // this, the scan runs against the old build and re-creates tickets for
+    // issues that were just fixed.
+    if (state.cycleNumber > 0) {
+      console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
+      await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
+    }
     console.log("[orchestrate] Running Playwright + axe scan...");
     try {
       await run("npx", ["playwright", "test"], PROJECT_ROOT);
@@ -73,7 +82,7 @@ async function scanNode(state: typeof CycleState.State) {
       console.warn("[orchestrate] Report generation had issues:", (err as Error).message.slice(0, 300));
     }
     console.log("[orchestrate] Scan complete.");
-    return {};
+    return { cycleNumber: state.cycleNumber + 1 };
   });
 }
 

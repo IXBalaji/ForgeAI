@@ -6,6 +6,7 @@ import { fixAttempts, tickets, deployments, reviewResults } from "../db/schema.j
 import { mergeBranch, createTag } from "../integrations/github.js";
 import { transitionTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
+import { resolveConflicts } from "./conflict-resolver.js";
 
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 
@@ -49,7 +50,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, attempt.ticketId));
   const jiraRef = ticket?.jiraKey ? ` [${ticket.jiraKey}]` : "";
 
-  let commitSha: string | null;
+  let commitSha: string | null = null;
   try {
     commitSha = await mergeBranch(
       attempt.branch,
@@ -57,16 +58,40 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
       `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${attempt.branch} into ${QA_BRANCH}`,
     );
   } catch (err) {
-    console.error(`[deploy] GitHub merge failed for ${attempt.branch}: ${(err as Error).message}`);
-    if (ticket?.jiraKey) {
-      await transitionTicket(ticket.jiraKey, "To Do");
+    const errMsg = (err as Error).message;
+    const isConflict = /409|conflict|merge/i.test(errMsg);
+
+    if (isConflict) {
+      console.warn(`[deploy] Merge conflict detected for ${attempt.branch}${jiraRef} — invoking conflict resolver...`);
+      try {
+        const resolution = await resolveConflicts(fixAttemptId);
+        if (resolution.resolved) {
+          console.log(`[deploy] Conflicts resolved for ${attempt.branch} — retrying merge...`);
+          commitSha = await mergeBranch(
+            attempt.branch,
+            QA_BRANCH,
+            `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${attempt.branch} into ${QA_BRANCH} (conflicts resolved)`,
+          );
+        } else {
+          console.error(`[deploy] Conflict resolver could not resolve conflicts for ${attempt.branch} (files: ${resolution.conflictFiles.join(", ")})`);
+        }
+      } catch (resolveErr) {
+        console.error(`[deploy] Conflict resolution failed for ${attempt.branch}: ${(resolveErr as Error).message}`);
+      }
     }
-    await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, attempt.ticketId));
-    const [deployment] = await db
-      .insert(deployments)
-      .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
-      .returning();
-    return { deploymentId: deployment.id, commitSha: null, tag: null };
+
+    if (!commitSha) {
+      console.error(`[deploy] GitHub merge failed for ${attempt.branch}: ${errMsg}`);
+      if (ticket?.jiraKey) {
+        await transitionTicket(ticket.jiraKey, "To Do");
+      }
+      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, attempt.ticketId));
+      const [deployment] = await db
+        .insert(deployments)
+        .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
+        .returning();
+      return { deploymentId: deployment.id, commitSha: null, tag: null };
+    }
   }
   if (!commitSha) {
     console.warn(`[deploy] Merge did not return a commit sha — GitHub may not be configured or branch is missing.`);
