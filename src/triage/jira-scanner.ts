@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { eq } from "drizzle-orm";
 import { searchTickets } from "../integrations/jira.js";
 import { JIRA_PROJECT_KEY } from "../lib/config.js";
+import { runAgentTrace } from "../observability/agent-tracing.js";
 import { db } from "../db/client.js";
 import { scanRuns, issues, tickets } from "../db/schema.js";
 import { categorize } from "./categorize.js";
@@ -13,6 +14,13 @@ export interface JiraSyncResult {
 }
 
 export async function syncJiraTickets(opts: {
+  jql?: string;
+  maxResults?: number;
+}): Promise<JiraSyncResult> {
+  return runAgentTrace("jira_sync", () => _syncJiraTickets(opts));
+}
+
+async function _syncJiraTickets(opts: {
   jql?: string;
   maxResults?: number;
 }): Promise<JiraSyncResult> {

@@ -40,20 +40,35 @@ export async function generateCostReport(options: {
     runType: "llm",
     startTime,
   })) {
-    const agent = run.name ?? "unknown";
+    const runName = run.name ?? "unknown";
+    const isAnthropicRun = runName.startsWith("anthropic.");
+    const agent = isAnthropicRun
+      ? runName.split(".")[1] ?? "unknown"
+      : runName;
     const metadata = (run.extra?.metadata ?? {}) as Record<string, unknown>;
     const model =
       (metadata.ls_model_name as string)
+      ?? (metadata.model_name as string)
       ?? (metadata.model as string)
       ?? "unknown";
 
-    const inputTokens = run.prompt_tokens ?? 0;
-    const outputTokens = run.completion_tokens ?? 0;
-    const totalTokens = run.total_tokens ?? (inputTokens + outputTokens);
+    const inputTokens =
+      (metadata.input_tokens as number)
+      ?? run.prompt_tokens
+      ?? 0;
+    const outputTokens =
+      (metadata.output_tokens as number)
+      ?? run.completion_tokens
+      ?? 0;
+    const totalTokens =
+      (metadata.total_tokens as number)
+      ?? run.total_tokens
+      ?? (inputTokens + outputTokens);
 
+    const metadataTotalCost = (metadata.total_cost as number) ?? 0;
     const sdkCost = (metadata.sdk_total_cost_usd as number) ?? 0;
     const computedCost = calculateCost(model, inputTokens, outputTokens);
-    const cost = sdkCost > 0 ? sdkCost : computedCost;
+    const cost = metadataTotalCost > 0 ? metadataTotalCost : sdkCost > 0 ? sdkCost : computedCost;
 
     const key = `${agent}::${model}`;
     const existing = usageByKey.get(key);

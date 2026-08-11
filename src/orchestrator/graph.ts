@@ -25,10 +25,12 @@ import { deployBranch } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
 import { ensureEpic } from "../integrations/jira.js";
 import { withSpan } from "../integrations/observability.js";
+import { runAgentTrace } from "../observability/agent-tracing.js";
+import { runIssueResolutionPipeline } from "../observability/anthropic-tracing.js";
+import { runWithPipelineContext, setPipelineCycleNumber } from "../observability/pipeline-context.js";
 import { run } from "../lib/exec.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
-import { traceable } from "langsmith/traceable";
 import { join } from "node:path";
 import path from "node:path";
 
@@ -88,29 +90,32 @@ const DEPLOY_SETTLE_MS = parseInt(process.env.DEPLOY_SETTLE_MS ?? "60000", 10);
 // ── Nodes ──────────────────────────────────────────────────────────────────
 
 async function scanNode(state: typeof CycleState.State) {
-  return withSpan("scan.playwright", async () => {
-    if (state.cycleNumber > 0) {
-      console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
-      await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
-    }
-    console.log("[orchestrate] Running Playwright + axe scan...");
-    try {
-      await run("npx", ["playwright", "test"], PROJECT_ROOT);
-    } catch (err) {
-      console.warn("[orchestrate] Some Playwright tests may have failed — continuing with available reports.", (err as Error).message.slice(0, 300));
-    }
-    try {
-      await run("node", ["src/scan/scripts/generate-a11y-report.mjs"], PROJECT_ROOT);
-    } catch (err) {
-      console.warn("[orchestrate] Report generation had issues:", (err as Error).message.slice(0, 300));
-    }
-    console.log("[orchestrate] Scan complete.");
-    return { cycleNumber: state.cycleNumber + 1, freshScan: true };
+  return runAgentTrace("scanner", async () => {
+    return withSpan("scan.playwright", async () => {
+      if (state.cycleNumber > 0) {
+        console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
+        await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
+      }
+      console.log("[orchestrate] Running Playwright + axe scan...");
+      try {
+        await run("npx", ["playwright", "test"], PROJECT_ROOT);
+      } catch (err) {
+        console.warn("[orchestrate] Some Playwright tests may have failed — continuing with available reports.", (err as Error).message.slice(0, 300));
+      }
+      try {
+        await run("node", ["src/scan/scripts/generate-a11y-report.mjs"], PROJECT_ROOT);
+      } catch (err) {
+        console.warn("[orchestrate] Report generation had issues:", (err as Error).message.slice(0, 300));
+      }
+      console.log("[orchestrate] Scan complete.");
+      setPipelineCycleNumber(state.cycleNumber + 1);
+      return { cycleNumber: state.cycleNumber + 1, freshScan: true };
+    });
   });
 }
 
 async function triageNode(state: typeof CycleState.State) {
-  return withSpan("agent.triage", async () => {
+  return runAgentTrace("triage", async () => {
     console.log("[orchestrate] Running triage from reports...");
     const epicKey = state.epicKey ?? (await ensureEpic(state.cycleId));
     const result = await triageFromReports({ cycleId: state.cycleId });
@@ -128,6 +133,12 @@ function routeAfterTriage(state: typeof CycleState.State) {
 }
 
 async function prepareBranchNode(state: typeof CycleState.State) {
+  return runAgentTrace("prepare_branch", async () => {
+    return _prepareBranchLogic(state);
+  });
+}
+
+async function _prepareBranchLogic(state: typeof CycleState.State) {
   const epicKey = state.epicKey;
 
   const openTickets = epicKey
@@ -186,7 +197,7 @@ async function fixNextNode(state: typeof CycleState.State) {
   const total = state.openTicketIds.length;
   const current = state.currentTicketIndex + 1;
 
-  return withSpan("agent.developer", async () => {
+  return runAgentTrace("developer", async () => {
     console.log(`[orchestrate] Fixing ticket ${current}/${total}: ${ticketId.slice(0, 8)}...`);
     const result: BatchFixResult = await fixTicketOnBranch(ticketId, state.worktreeDir!);
 
@@ -216,22 +227,24 @@ function routeAfterFix(state: typeof CycleState.State) {
 }
 
 async function pushBranchNode(state: typeof CycleState.State) {
-  const releaseLock = await gitRepoMutex.acquire();
-  try {
-    if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-      const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
-      await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
+  return runAgentTrace("push_branch", async () => {
+    const releaseLock = await gitRepoMutex.acquire();
+    try {
+      if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+        const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+        await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
+      }
+      await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
+      console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
+    } finally {
+      releaseLock();
     }
-    await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
-    console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
-  } finally {
-    releaseLock();
-  }
-  return {};
+    return {};
+  });
 }
 
 async function reviewerNode(state: typeof CycleState.State) {
-  return withSpan("agent.reviewer", async () => {
+  return runAgentTrace("reviewer", async () => {
     console.log(`[orchestrate] Reviewing branch ${state.branch} (${state.fixedTicketIds.length} ticket(s))...`);
     const result = await reviewBranch(state.worktreeDir!, state.fixedTicketIds);
     console.log(`[orchestrate] Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""}`);
@@ -252,7 +265,7 @@ function routeAfterReview(state: typeof CycleState.State) {
 }
 
 async function autofixNode(state: typeof CycleState.State) {
-  return withSpan("agent.developer.autofix", async () => {
+  return runAgentTrace("autofix", async () => {
     console.log(`[orchestrate] Autofixing build errors (retry ${state.retryCount + 1}/${MAX_REVIEW_RETRIES})...`);
     const commitSha = await fixBuildErrors(state.worktreeDir!, state.reviewComments ?? "Build failed");
 
@@ -277,7 +290,7 @@ async function autofixNode(state: typeof CycleState.State) {
 }
 
 async function deployNode(state: typeof CycleState.State) {
-  return withSpan("agent.deploy", async () => {
+  return runAgentTrace("deploy", async () => {
     console.log(`[orchestrate] Deploying branch ${state.branch}...`);
     const result = await deployBranch(state.branch!, state.fixedTicketIds);
     console.log(`[orchestrate] Deploy complete — ${result.ticketsDeployed} ticket(s) merged.`);
@@ -286,24 +299,26 @@ async function deployNode(state: typeof CycleState.State) {
 }
 
 async function cleanupNode(state: typeof CycleState.State) {
-  if (!state.worktreeDir) return {};
-  const releaseLock = await gitRepoMutex.acquire();
-  try {
-    await run("git", ["worktree", "remove", "--force", state.worktreeDir], TARGET_REPO_PATH);
-  } catch {
-    console.warn(`[orchestrate] Could not remove worktree at ${state.worktreeDir}.`);
-  } finally {
-    releaseLock();
-  }
-
-  // Reset unfixed tickets back to open
-  if (state.reviewVerdict === "rejected") {
-    for (const ticketId of state.fixedTicketIds) {
-      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+  return runAgentTrace("cleanup", async () => {
+    if (!state.worktreeDir) return {};
+    const releaseLock = await gitRepoMutex.acquire();
+    try {
+      await run("git", ["worktree", "remove", "--force", state.worktreeDir], TARGET_REPO_PATH);
+    } catch {
+      console.warn(`[orchestrate] Could not remove worktree at ${state.worktreeDir}.`);
+    } finally {
+      releaseLock();
     }
-  }
 
-  return { branch: null, worktreeDir: null, openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0 };
+    // Reset unfixed tickets back to open
+    if (state.reviewVerdict === "rejected") {
+      for (const ticketId of state.fixedTicketIds) {
+        await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+      }
+    }
+
+    return { branch: null, worktreeDir: null, openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0 };
+  });
 }
 
 function routeAfterCleanup(state: typeof CycleState.State) {
@@ -311,7 +326,7 @@ function routeAfterCleanup(state: typeof CycleState.State) {
 }
 
 async function releaseNode(state: typeof CycleState.State) {
-  return withSpan("agent.release", async () => {
+  return runAgentTrace("release", async () => {
     console.log(`[orchestrate] Running release for cycle ${state.cycleId}...`);
     await db.update(iterationCycles).set({ endedAt: new Date() }).where(eq(iterationCycles.id, state.cycleId));
     await runReleaseAgent(state.cycleId);
@@ -349,7 +364,9 @@ export function buildGraph() {
   return graph;
 }
 
-export const runOrchestratorCycle = traceable(_runOrchestratorCycle, { name: "orchestrator-cycle", run_type: "chain" });
+export async function runOrchestratorCycle(): Promise<void> {
+  return _runOrchestratorCycle();
+}
 
 async function _runOrchestratorCycle() {
   const { initObservability } = await import("../integrations/observability.js");
@@ -368,21 +385,25 @@ async function _runOrchestratorCycle() {
   console.log(`[orchestrate] Starting pipeline — cycle ${cycle.id}`);
   console.log(`[orchestrate] Flow: scan → triage → prepareBranch → fix (all tickets) → push → review → deploy → release`);
 
-  await compiled.invoke(
-    {
-      cycleId: cycle.id,
-      cycleNumber: 0,
-      epicKey: null,
-      branch: null,
-      worktreeDir: null,
-      openTicketIds: [],
-      fixedTicketIds: [],
-      currentTicketIndex: 0,
-      reviewVerdict: null,
-      reviewComments: null,
-      retryCount: 0,
-      freshScan: true,
-    },
-    { configurable: { thread_id: cycle.id } },
+  await runWithPipelineContext({ pipeline_run_id: cycle.id, cycle_number: 0 }, async () =>
+    runIssueResolutionPipeline(async () => {
+      await compiled.invoke(
+        {
+          cycleId: cycle.id,
+          cycleNumber: 0,
+          epicKey: null,
+          branch: null,
+          worktreeDir: null,
+          openTicketIds: [],
+          fixedTicketIds: [],
+          currentTicketIndex: 0,
+          reviewVerdict: null,
+          reviewComments: null,
+          retryCount: 0,
+          freshScan: true,
+        },
+        { configurable: { thread_id: cycle.id }, callbacks: [] },
+      );
+    }),
   );
 }

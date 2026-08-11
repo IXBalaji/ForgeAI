@@ -2,7 +2,9 @@ import "dotenv/config";
 import { join, resolve } from "node:path";
 import { rm } from "node:fs/promises";
 import { eq, inArray } from "drizzle-orm";
-import { traceable, getCurrentRunTree } from "langsmith/traceable";
+import { traceable } from "langsmith/traceable";
+import { traceAnthropicAgentSdkQuery } from "../observability/anthropic-tracing.js";
+import type { PipelineAgentName } from "../observability/pipeline-context.js";
 import { db } from "../db/client.js";
 import { tickets, fixAttempts, issues } from "../db/schema.js";
 import { run } from "../lib/exec.js";
@@ -51,114 +53,48 @@ async function ensureWorktree(branch: string, worktreeDir: string): Promise<void
   }
 }
 
-// traceable so the actual model interaction shows up in LangSmith with its
-// full prompt/response — the Claude Agent SDK isn't LangChain-native, so
-// LangSmith's automatic LangGraph tracing has no visibility into this call
-// on its own.
-const runAgentWithRetry = traceable(_runAgentWithRetry, {
-  name: "developer-agent-sdk-call",
-  run_type: "llm",
-  metadata: { model: DEVELOPER_MODEL, ls_model_name: DEVELOPER_MODEL, ls_provider: "anthropic" },
-});
-
-async function _runAgentWithRetry(prompt: string, worktreeDir: string): Promise<void> {
+async function runAgentWithRetry(
+  prompt: string,
+  worktreeDir: string,
+  opts?: { issue_id?: string | null; operation_name?: string; agent_name?: PipelineAgentName },
+): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.warn("[developer] ANTHROPIC_API_KEY not set — skipping the actual fix, worktree left in place.");
     return;
   }
 
-  let lastErr: Error | null = null;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      if (attempt > 0) {
-        console.log(`[developer] Retrying Claude Agent SDK call (attempt ${attempt + 1}/${MAX_RETRIES + 1})...`);
-      }
-      const { query } = await import("@anthropic-ai/claude-agent-sdk");
-      for await (const message of query({
-        prompt,
-        options: {
-          cwd: worktreeDir,
-          allowedTools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
-          permissionMode: "acceptEdits",
-          model: DEVELOPER_MODEL,
-          effort: DEVELOPER_EFFORT,
-        },
-      } as any)) {
-        if ((message as any).type === "assistant") {
-          console.log("[developer]", JSON.stringify((message as any).message?.content ?? message));
-        }
-        if ((message as any).type === "result") {
-          attachSdkUsageToRun(message as any);
-        }
-      }
-      return;
-    } catch (err) {
-      lastErr = err as Error;
-      const isRetryable = /timeout|ECONNRESET|529|overloaded|rate.limit|socket hang up/i.test(lastErr.message);
-      if (!isRetryable || attempt >= MAX_RETRIES) break;
-      const delay = Math.min(1000 * 2 ** attempt, 30000);
-      console.warn(`[developer] Agent call failed (${lastErr.message}), retrying in ${delay / 1000}s...`);
-      await new Promise((r) => setTimeout(r, delay));
-    }
-  }
-  console.warn(`[developer] Agent call failed after ${MAX_RETRIES + 1} attempts: ${lastErr?.message}`);
-}
-
-function attachSdkUsageToRun(result: {
-  total_cost_usd?: number;
-  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
-  modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }>;
-  num_turns?: number;
-  duration_ms?: number;
-}): void {
+  const operation_name = opts?.operation_name ?? "generate_fix";
   try {
-    const runTree = getCurrentRunTree();
-    const usage = result.usage;
-    if (usage) {
-      runTree.inputs = { ...runTree.inputs, prompt_summary: "(SDK agent session)" };
-      runTree.outputs = {
-        total_cost_usd: result.total_cost_usd,
-        num_turns: result.num_turns,
-        duration_ms: result.duration_ms,
-        model_breakdown: result.modelUsage,
-      };
-
-      const inputTokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
-      const outputTokens = usage.output_tokens ?? 0;
-
-      (runTree as any).prompt_tokens = inputTokens;
-      (runTree as any).completion_tokens = outputTokens;
-      (runTree as any).total_tokens = inputTokens + outputTokens;
-
-      const modelNames = Object.keys(result.modelUsage ?? {});
-      if (modelNames.length > 0) {
-        runTree.extra = {
-          ...runTree.extra,
-          metadata: {
-            ...(runTree.extra?.metadata as Record<string, unknown> ?? {}),
-            ls_model_name: modelNames[0],
-            ls_provider: "anthropic",
-            model: modelNames[0],
-            sdk_total_cost_usd: result.total_cost_usd,
-            sdk_model_usage: result.modelUsage,
-          },
-        };
-      }
-    }
-    console.log(`[developer] LangSmith usage attached: ${JSON.stringify({
-      input_tokens: usage?.input_tokens,
-      output_tokens: usage?.output_tokens,
-      cache_read: usage?.cache_read_input_tokens,
-      total_cost_usd: result.total_cost_usd,
-      models: Object.keys(result.modelUsage ?? {}),
-    })}`);
+    await traceAnthropicAgentSdkQuery({
+      agent_name: opts?.agent_name ?? "developer",
+      operation_name,
+      model_name: DEVELOPER_MODEL,
+      issue_id: opts?.issue_id,
+      inputs: {
+        operation_name,
+        issue_id: opts?.issue_id,
+        worktree_dir: worktreeDir,
+      },
+      prompt,
+      max_retries: MAX_RETRIES,
+      sdkOptions: {
+        cwd: worktreeDir,
+        allowedTools: ["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
+        permissionMode: "acceptEdits",
+        model: DEVELOPER_MODEL,
+        effort: DEVELOPER_EFFORT,
+      },
+      onAssistantMessage: (content) => {
+        console.log("[developer]", JSON.stringify(content));
+      },
+    });
   } catch (err) {
-    console.warn(`[developer] Could not attach SDK usage to LangSmith run: ${(err as Error).message}`);
+    console.warn(`[developer] Agent call failed after ${MAX_RETRIES + 1} attempts: ${(err as Error).message}`);
   }
 }
 
 export const runDeveloperAgent = traceable(_runDeveloperAgent, {
-  name: "developer-agent",
+  name: "developer.run",
   run_type: "chain",
   metadata: { model: DEVELOPER_MODEL },
 });
@@ -222,7 +158,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   console.log(`[developer]   Worktree: ${worktreeDir}`);
   console.log(`[developer]   Prompt length: ${prompt.length} chars`);
   const sdkStart = Date.now();
-  await runAgentWithRetry(prompt, worktreeDir);
+  await runAgentWithRetry(prompt, worktreeDir, { issue_id: ticketId, operation_name: "generate_fix" });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
   console.log(`[developer] ── SDK agent finished for ticket ${ticketId} (${sdkDuration}s) ──`);
 
@@ -368,7 +304,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
  * after all tickets are fixed.
  */
 export const fixTicketOnBranch = traceable(_fixTicketOnBranch, {
-  name: "developer-fix-on-branch",
+  name: "developer.fix_ticket",
   run_type: "chain",
   metadata: { model: DEVELOPER_MODEL },
 });
@@ -395,7 +331,7 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
   const jiraRef = ticket?.jiraKey ?? ticketId.slice(0, 8);
   console.log(`[developer] ── SDK agent starting for ${jiraRef} ──`);
   const sdkStart = Date.now();
-  await runAgentWithRetry(prompt, worktreeDir);
+  await runAgentWithRetry(prompt, worktreeDir, { issue_id: ticketId, operation_name: "generate_fix" });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
   console.log(`[developer] ── SDK agent finished for ${jiraRef} (${sdkDuration}s) ──`);
 
@@ -446,7 +382,7 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
  * output and fixes it in place, then commits.
  */
 export const fixBuildErrors = traceable(_fixBuildErrors, {
-  name: "developer-fix-build-errors",
+  name: "autofix.fix_build_errors",
   run_type: "chain",
   metadata: { model: DEVELOPER_MODEL },
 });
@@ -471,7 +407,7 @@ async function _fixBuildErrors(worktreeDir: string, reviewComments: string): Pro
 
   console.log(`[developer] ── Autofix starting for build errors ──`);
   const sdkStart = Date.now();
-  await runAgentWithRetry(prompt, worktreeDir);
+  await runAgentWithRetry(prompt, worktreeDir, { operation_name: "fix_build_errors", agent_name: "autofix" });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
   console.log(`[developer] ── Autofix finished (${sdkDuration}s) ──`);
 

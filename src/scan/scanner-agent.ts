@@ -90,7 +90,7 @@ function runAllSources(baseUrl: string, routes: string[], storageState?: object)
  * is logged in and its routes are scanned separately, with all findings
  * merged and deduped by fingerprint.
  */
-export const runScannerAgent = traceable(_runScannerAgent, { name: "scanner-agent", run_type: "chain" });
+export const runScannerAgent = traceable(_runScannerAgent, { name: "scanner.run_scan", run_type: "chain" });
 
 async function _runScannerAgent(opts: ScannerOptions): Promise<ScannerResult> {
   const [{ id: scanRunId }] = await db

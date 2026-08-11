@@ -1,7 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { traceable, getCurrentRunTree } from "langsmith/traceable";
-import { CLASSIFIER_MODEL } from "../lib/config.js";
 import type { AggregatedIssue } from "./report-reader.js";
+import { CLASSIFIER_MODEL } from "../lib/config.js";
+import { traceAnthropicMessagesCreate } from "../observability/anthropic-tracing.js";
 
 export type IssueType = "code_change" | "bad_data" | "infrastructure" | "design";
 
@@ -54,14 +53,7 @@ Affected elements by page:
 ${pages}`;
 }
 
-export const classifyIssues = traceable(_classifyIssues, {
-  name: "issue-classifier",
-  run_type: "llm",
-  metadata: { model: CLASSIFIER_MODEL },
-});
-
-async function _classifyIssues(issues: AggregatedIssue[]): Promise<ClassifiedIssue[]> {
-  const client = new Anthropic();
+export async function classifyIssues(issues: AggregatedIssue[]): Promise<ClassifiedIssue[]> {
   const classified: ClassifiedIssue[] = [];
 
   const batchContext = issues
@@ -71,35 +63,25 @@ async function _classifyIssues(issues: AggregatedIssue[]): Promise<ClassifiedIss
   let results: Array<{ issueType: IssueType; reason: string; priority: string; labels: string[] }>;
 
   try {
-    const response = await client.messages.create({
-      model: CLASSIFIER_MODEL,
-      max_tokens: 2048,
-      messages: [
-        {
-          role: "user",
-          content: `${CLASSIFICATION_PROMPT}\n\nClassify each of these ${issues.length} issues. Return a JSON array with one object per issue, in the same order.\n\n${batchContext}`,
-        },
-      ],
-    });
-
-    try {
-      const runTree = getCurrentRunTree();
-      runTree.extra = {
-        ...runTree.extra,
-        metadata: {
-          ...(runTree.extra?.metadata as Record<string, unknown> ?? {}),
-          ls_model_name: CLASSIFIER_MODEL,
-          ls_provider: "anthropic",
-        },
-      };
-      runTree.inputs = { issue_count: issues.length, model: CLASSIFIER_MODEL };
-      runTree.outputs = {
-        input_tokens: response.usage.input_tokens,
-        output_tokens: response.usage.output_tokens,
-      };
-    } catch {
-      // tracing unavailable
-    }
+    const userContent = `${CLASSIFICATION_PROMPT}\n\nClassify each of these ${issues.length} issues. Return a JSON array with one object per issue, in the same order.\n\n${batchContext}`;
+    const response = await traceAnthropicMessagesCreate(
+      {
+        agent_name: "triage",
+        operation_name: "issue_classification",
+        model_name: CLASSIFIER_MODEL,
+      },
+      {
+        issue_count: issues.length,
+        operation_name: "issue_classification",
+        messages: [{ role: "user", content: userContent }],
+      },
+      (client) =>
+        client.messages.create({
+          model: CLASSIFIER_MODEL,
+          max_tokens: 2048,
+          messages: [{ role: "user", content: userContent }],
+        }),
+    );
 
     const raw = response.content[0].type === "text" ? response.content[0].text : "";
     const text = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();

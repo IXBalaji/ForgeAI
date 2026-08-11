@@ -4,11 +4,48 @@ import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { fixAttempts, tickets, deployments, reviewResults } from "../db/schema.js";
 import { mergeBranch, createTag, updateBranchFromBase } from "../integrations/github.js";
-import { transitionTicket } from "../integrations/jira.js";
+import { transitionTicket, commentOnTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
 import { resolveConflicts } from "./conflict-resolver.js";
 
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
+
+async function postResolutionComment(
+  jiraKey: string,
+  opts: { branch: string; commitSha: string | null; tag: string | null; ticketId: string },
+): Promise<void> {
+  const attempts = await db
+    .select()
+    .from(fixAttempts)
+    .where(eq(fixAttempts.ticketId, opts.ticketId));
+
+  const resolvedIssueCount: number[] = [];
+  const reviewComments: string[] = [];
+
+  for (const attempt of attempts) {
+    const [review] = await db
+      .select()
+      .from(reviewResults)
+      .where(eq(reviewResults.fixAttemptId, attempt.id));
+    if (review) {
+      const ids = review.resolvedIssueIds as string[];
+      resolvedIssueCount.push(ids.length);
+      if (review.comments) reviewComments.push(review.comments);
+    }
+  }
+
+  const totalResolved = resolvedIssueCount.reduce((a, b) => a + b, 0);
+  const lines = [
+    `Resolved via branch \`${opts.branch}\`.`,
+    opts.commitSha ? `Merge commit: ${opts.commitSha}` : null,
+    opts.tag ? `Rollback tag: ${opts.tag}` : null,
+    totalResolved > 0 ? `Issues resolved: ${totalResolved}` : null,
+    attempts.length > 1 ? `Fix attempts: ${attempts.length}` : null,
+    reviewComments.length > 0 ? `\nReview notes:\n${reviewComments.join("\n")}` : null,
+  ];
+
+  await commentOnTicket(jiraKey, lines.filter(Boolean).join("\n"));
+}
 
 export interface DeployResult {
   deploymentId: string | null;
@@ -29,7 +66,7 @@ export interface BranchDeployResult {
  * of a git-archaeology exercise.
  */
 export const runDeployAgent = traceable(_runDeployAgent, {
-  name: "deploy-agent",
+  name: "deploy.run",
   run_type: "chain",
   metadata: { model: "orchestrator" },
 });
@@ -129,6 +166,12 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   await db.update(tickets).set({ status: "done" }).where(eq(tickets.id, attempt.ticketId));
 
   if (ticket?.jiraKey) {
+    await postResolutionComment(ticket.jiraKey, {
+      branch: attempt.branch,
+      commitSha,
+      tag,
+      ticketId: attempt.ticketId,
+    });
     await transitionTicket(ticket.jiraKey, "Done");
   }
 
@@ -140,7 +183,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
  * All tickets are marked "done" on success.
  */
 export const deployBranch = traceable(_deployBranch, {
-  name: "branch-deploy",
+  name: "deploy.merge_branch",
   run_type: "chain",
   metadata: { model: "orchestrator" },
 });
@@ -212,7 +255,15 @@ async function _deployBranch(
 
   for (const t of allTickets) {
     await db.update(tickets).set({ status: "done" }).where(eq(tickets.id, t.id));
-    if (t.jiraKey) await transitionTicket(t.jiraKey, "Done");
+    if (t.jiraKey) {
+      await postResolutionComment(t.jiraKey, {
+        branch,
+        commitSha,
+        tag,
+        ticketId: t.id,
+      });
+      await transitionTicket(t.jiraKey, "Done");
+    }
   }
 
   console.log(`[deploy] Merged ${branch} — ${allTickets.length} ticket(s) deployed.`);

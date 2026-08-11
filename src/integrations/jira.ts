@@ -180,6 +180,32 @@ export async function searchTickets(jql: string, maxResults = 50): Promise<any[]
   return result.issues ?? [];
 }
 
+export async function updateJiraTicket(params: {
+  jiraKey: string;
+  summary?: string;
+  description?: { type: "doc"; version: 1; content: any[] };
+  labels?: string[];
+  priority?: string;
+}): Promise<void> {
+  if (!isJiraConfigured()) return;
+
+  const priorityMap: Record<string, string> = { P1: "Highest", P2: "High", P3: "Medium", P4: "Low" };
+
+  const fields: Record<string, any> = {};
+  if (params.summary) fields.summary = truncateSummary(params.summary);
+  if (params.description) fields.description = params.description;
+  if (params.labels) fields.labels = params.labels;
+  if (params.priority && priorityMap[params.priority]) {
+    fields.priority = { name: priorityMap[params.priority] };
+  }
+
+  await jiraFetch(`/rest/api/3/issue/${params.jiraKey}`, {
+    method: "PUT",
+    body: JSON.stringify({ fields }),
+  });
+  console.log(`[jira] Updated ${params.jiraKey}`);
+}
+
 export async function transitionTicket(jiraKey: string, transitionName: string): Promise<void> {
   if (!isJiraConfigured()) return;
   const { transitions } = await jiraFetch(`/rest/api/3/issue/${jiraKey}/transitions`, { method: "GET" });

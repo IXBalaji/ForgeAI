@@ -2,7 +2,8 @@ import "dotenv/config";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { eq, inArray } from "drizzle-orm";
-import { traceable, getCurrentRunTree } from "langsmith/traceable";
+import { traceable } from "langsmith/traceable";
+import { traceAnthropicAgentSdkQuery } from "../observability/anthropic-tracing.js";
 import { db } from "../db/client.js";
 import { tickets, issues, fixAttempts } from "../db/schema.js";
 import { run } from "../lib/exec.js";
@@ -37,7 +38,7 @@ export interface ConflictResolveResult {
  *   6. Clean up worktree
  */
 export const resolveConflicts = traceable(_resolveConflicts, {
-  name: "conflict-resolver",
+  name: "deploy.resolve_conflicts",
   run_type: "chain",
   metadata: { model: DEVELOPER_MODEL },
 });
@@ -363,15 +364,7 @@ async function buildConflictPrompt(
     .join("\n");
 }
 
-const runConflictAgent = traceable(_runConflictAgent, {
-  name: "conflict-resolver-sdk-call",
-  run_type: "llm",
-});
-
-async function _runConflictAgent(
-  prompt: string,
-  worktreeDir: string,
-): Promise<void> {
+async function runConflictAgent(prompt: string, worktreeDir: string, issueId?: string | null): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.warn(
       "[conflict-resolver] ANTHROPIC_API_KEY not set — cannot resolve conflicts automatically.",
@@ -379,66 +372,33 @@ async function _runConflictAgent(
     return;
   }
 
-  let lastErr: Error | null = null;
-  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-    try {
-      if (attempt > 0) {
-        console.log(
-          `[conflict-resolver] Retrying SDK call (attempt ${attempt + 1}/${MAX_RETRIES + 1})...`,
-        );
-      }
-      const { query } = await import("@anthropic-ai/claude-agent-sdk");
-      for await (const message of query({
-        prompt,
-        options: {
-          cwd: worktreeDir,
-          allowedTools: ["Read", "Edit", "Grep", "Glob"],
-          permissionMode: "acceptEdits",
-          model: DEVELOPER_MODEL,
-          effort: DEVELOPER_EFFORT,
-        },
-      } as any)) {
-        if ((message as any).type === "assistant") {
-          console.log(
-            "[conflict-resolver]",
-            JSON.stringify((message as any).message?.content ?? message),
-          );
-        }
-        if ((message as any).type === "result") {
-          try {
-            const r = message as any;
-            const runTree = getCurrentRunTree();
-            const usage = r.usage;
-            if (usage) {
-              const inputTokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
-              (runTree as any).prompt_tokens = inputTokens;
-              (runTree as any).completion_tokens = usage.output_tokens ?? 0;
-              (runTree as any).total_tokens = inputTokens + (usage.output_tokens ?? 0);
-              runTree.outputs = { total_cost_usd: r.total_cost_usd, model_breakdown: r.modelUsage };
-              const modelNames = Object.keys(r.modelUsage ?? {});
-              if (modelNames.length > 0) {
-                runTree.extra = { ...runTree.extra, metadata: { ...(runTree.extra?.metadata as Record<string, unknown> ?? {}), ls_model_name: modelNames[0], ls_provider: "anthropic", sdk_total_cost_usd: r.total_cost_usd } };
-              }
-            }
-          } catch { /* best effort */ }
-        }
-      }
-      return;
-    } catch (err) {
-      lastErr = err as Error;
-      const isRetryable =
-        /timeout|ECONNRESET|529|overloaded|rate.limit|socket hang up/i.test(
-          lastErr.message,
-        );
-      if (!isRetryable || attempt >= MAX_RETRIES) break;
-      const delay = Math.min(1000 * 2 ** attempt, 30000);
-      console.warn(
-        `[conflict-resolver] SDK call failed (${lastErr.message}), retrying in ${delay / 1000}s...`,
-      );
-      await new Promise((r) => setTimeout(r, delay));
-    }
+  try {
+    await traceAnthropicAgentSdkQuery({
+      agent_name: "conflict_resolver",
+      operation_name: "resolve_conflicts",
+      model_name: DEVELOPER_MODEL,
+      issue_id: issueId,
+      inputs: {
+        operation_name: "resolve_conflicts",
+        issue_id: issueId,
+        worktree_dir: worktreeDir,
+      },
+      prompt,
+      max_retries: MAX_RETRIES,
+      sdkOptions: {
+        cwd: worktreeDir,
+        allowedTools: ["Read", "Edit", "Grep", "Glob"],
+        permissionMode: "acceptEdits",
+        model: DEVELOPER_MODEL,
+        effort: DEVELOPER_EFFORT,
+      },
+      onAssistantMessage: (content) => {
+        console.log("[conflict-resolver]", JSON.stringify(content));
+      },
+    });
+  } catch (err) {
+    console.warn(
+      `[conflict-resolver] SDK call failed after ${MAX_RETRIES + 1} attempts: ${(err as Error).message}`,
+    );
   }
-  console.warn(
-    `[conflict-resolver] SDK call failed after ${MAX_RETRIES + 1} attempts: ${lastErr?.message}`,
-  );
 }

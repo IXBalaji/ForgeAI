@@ -12,7 +12,7 @@ import type { ReleaseReport } from "../types/index.js";
  * Release agent — compiles fixed/parked/flagged into one report and
  * notifies via Slack + email, per architecture doc §01/§06.
  */
-export const runReleaseAgent = traceable(_runReleaseAgent, { name: "release-agent", run_type: "chain" });
+export const runReleaseAgent = traceable(_runReleaseAgent, { name: "release.run", run_type: "chain" });
 
 async function _runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
   const [cycle] = await db.select().from(iterationCycles).where(eq(iterationCycles.id, cycleId));

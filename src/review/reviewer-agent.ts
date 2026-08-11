@@ -31,7 +31,7 @@ export interface BranchReviewVerdict {
 }
 
 export const runReviewerAgent = traceable(_runReviewerAgent, {
-  name: "reviewer-agent",
+  name: "reviewer.run",
   run_type: "chain",
   metadata: { model: "orchestrator" },
 });
@@ -234,7 +234,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
  * lint/test gate, and adversarial review on the full diff.
  */
 export const reviewBranch = traceable(_reviewBranch, {
-  name: "branch-reviewer",
+  name: "reviewer.review_branch",
   run_type: "chain",
   metadata: { model: "orchestrator" },
 });
