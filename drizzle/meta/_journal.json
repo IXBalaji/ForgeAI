@@ -15,6 +15,13 @@
       "when": 1786091004461,
       "tag": "0001_high_payback",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786417316950,
+      "tag": "0002_happy_captain_britain",
+      "breakpoints": true
     }
   ]
 }

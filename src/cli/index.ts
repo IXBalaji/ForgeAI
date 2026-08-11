@@ -183,12 +183,17 @@ program
         console.error(`[fix:all] Gave up on ticket ${ticket.id} after ${maxRetries + 1} developer attempts`);
         continue;
       }
+      if (!devResult.fixAttemptId) {
+        console.warn(`[fix:all] Developer produced no commit for ticket ${ticket.id} — skipping review/deploy.`);
+        continue;
+      }
+      const fixAttemptId = devResult.fixAttemptId;
 
       // Stage 2: Reviewer agent
       let reviewResult: ReviewerVerdict | null = null;
       try {
-        console.log(`[fix:all] Running reviewer on fix attempt ${devResult.fixAttemptId}...`);
-        reviewResult = await withSpan("agent.reviewer", () => runReviewerAgent(devResult!.fixAttemptId));
+        console.log(`[fix:all] Running reviewer on fix attempt ${fixAttemptId}...`);
+        reviewResult = await withSpan("agent.reviewer", () => runReviewerAgent(fixAttemptId));
         console.log(`[fix:all] Reviewer verdict:`, JSON.stringify(reviewResult, null, 2));
       } catch (err) {
         console.error(`[fix:all] Reviewer failed: ${(err as Error).message}`);
@@ -206,8 +211,8 @@ program
 
       // Stage 3: Deploy agent (merge PR + tag)
       try {
-        console.log(`[fix:all] Running deploy on fix attempt ${devResult.fixAttemptId}...`);
-        const deployResult: DeployResult = await withSpan("agent.deploy", () => runDeployAgent(devResult!.fixAttemptId));
+        console.log(`[fix:all] Running deploy on fix attempt ${fixAttemptId}...`);
+        const deployResult: DeployResult = await withSpan("agent.deploy", () => runDeployAgent(fixAttemptId));
         console.log(`[fix:all] Deploy done:`, JSON.stringify(deployResult, null, 2));
       } catch (err) {
         console.error(`[fix:all] Deploy failed: ${(err as Error).message}`);

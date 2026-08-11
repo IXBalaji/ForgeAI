@@ -11,6 +11,7 @@ import { testGate } from "./test-gate.js";
 import { adversarialReview } from "./adversarial-review.js";
 import { startEphemeralPreview } from "./ephemeral-preview.js";
 import { runAxeScan, fingerprintFinding } from "../scan/axe-scan.js";
+import { transitionTicket } from "../integrations/jira.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
@@ -28,6 +29,9 @@ export const runReviewerAgent = traceable(_runReviewerAgent, { name: "reviewer-a
 async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict> {
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
   if (!attempt) throw new Error(`FixAttempt ${fixAttemptId} not found`);
+  if (attempt.pushStatus !== "pushed") {
+    console.warn(`[reviewer] FixAttempt ${fixAttemptId} pushStatus is "${attempt.pushStatus}" — branch may only exist locally.`);
+  }
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, attempt.ticketId));
   if (!ticket) {
     console.error(`[reviewer] Ticket ${attempt.ticketId} not found — rejecting fix attempt.`);
@@ -190,12 +194,17 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   // Ticket status transition — see architecture doc §01/§06 for the park/flag rules.
   if (verdict === "approved" && guard.flagged) {
     await db.update(tickets).set({ status: "flagged" }).where(eq(tickets.id, attempt.ticketId));
+    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "In Review");
   } else if (verdict === "rejected" && attempt.attemptNumber >= 2) {
     await db.update(tickets).set({ status: "parked" }).where(eq(tickets.id, attempt.ticketId));
+    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
   } else if (verdict === "rejected") {
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, attempt.ticketId));
+    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+  } else if (verdict === "approved") {
+    // Clean approval — stays "in_review" in DB; Deploy agent sets "done".
+    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "In Review");
   }
-  // verdict === "approved" && !guard.flagged -> stays "in_review"; the Deploy agent sets "done".
 
   releaseLock = await gitRepoMutex.acquire();
   try {

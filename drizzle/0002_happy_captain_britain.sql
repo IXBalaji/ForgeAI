@@ -1,0 +1,1 @@
+ALTER TABLE "fix_attempts" ADD COLUMN "push_status" text DEFAULT 'pending' NOT NULL;

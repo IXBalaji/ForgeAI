@@ -169,6 +169,10 @@ async function developerNode(state: typeof TicketState.State) {
 }
 
 function routeDevToReviewer(state: any) {
+  if (!state.fixAttemptId) {
+    console.log(`[orchestrate] Developer produced no commit for ticket ${state.ticketId} — skipping reviewer.`);
+    return END;
+  }
   return new Send("reviewer", {
     ticketId: state.ticketId,
     epicKey: state.epicKey,
@@ -181,7 +185,13 @@ async function reviewerNode(state: any) {
     console.log(`[orchestrate] Running reviewer on fix attempt ${state.fixAttemptId}...`);
     const result = await runReviewerAgent(state.fixAttemptId);
     console.log(`[orchestrate] Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""}.`);
-    return { reviewVerdict: result.verdict, scopeGuardFlagged: result.scopeGuardFlagged } as any;
+    return {
+      reviewVerdict: result.verdict,
+      scopeGuardFlagged: result.scopeGuardFlagged,
+      fixAttemptId: state.fixAttemptId,
+      ticketId: state.ticketId,
+      epicKey: state.epicKey,
+    } as any;
   });
 }
 
@@ -205,7 +215,7 @@ function routeAfterReview(state: any) {
 async function routeRejectionNode(state: any) {
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, state.ticketId));
   if (ticket?.status === "open") {
-    return { shouldRetry: true } as any;
+    return { shouldRetry: true, ticketId: state.ticketId, epicKey: state.epicKey } as any;
   }
   return { shouldRetry: false } as any;
 }
@@ -244,7 +254,7 @@ export function buildGraph() {
     .addEdge(START, "scan")
     .addEdge("scan", "triage")
     .addConditionalEdges("triage", routeAfterTriage, ["developer", "reviewer", "deploy", "release"])
-    .addConditionalEdges("developer", routeDevToReviewer, ["reviewer"])
+    .addConditionalEdges("developer", routeDevToReviewer, ["reviewer", END])
     .addConditionalEdges("reviewer", routeAfterReview, ["routeRejection", "deploy", END])
     .addConditionalEdges("routeRejection", routeRejectionEdge, ["developer", END])
     .addEdge("deploy", "scan")

@@ -57,6 +57,7 @@ export const fixAttempts = pgTable("fix_attempts", {
     .references(() => tickets.id),
   branch: text("branch").notNull(),
   commitSha: text("commit_sha"),
+  pushStatus: text("push_status").notNull().default("pending"),
   prUrl: text("pr_url"),
   developerAgentRunId: text("developer_agent_run_id").notNull(),
   attemptNumber: integer("attempt_number").notNull(),

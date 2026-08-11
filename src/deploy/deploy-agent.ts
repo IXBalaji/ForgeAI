@@ -26,6 +26,15 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
   if (!attempt) throw new Error(`FixAttempt ${fixAttemptId} not found`);
 
+  if (attempt.pushStatus !== "pushed") {
+    console.error(`[deploy] FixAttempt ${fixAttemptId} was never pushed to remote (status: ${attempt.pushStatus}). Cannot merge.`);
+    const [deployment] = await db
+      .insert(deployments)
+      .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
+      .returning();
+    return { deploymentId: deployment.id, commitSha: null, tag: null };
+  }
+
   const [review] = await db.select().from(reviewResults).where(eq(reviewResults.fixAttemptId, fixAttemptId));
   if (!review || review.verdict !== "approved" || review.scopeGuardFlagged) {
     const reason = !review ? "no review result" : review.scopeGuardFlagged ? "scope-flagged for manual review" : `verdict: ${review.verdict}`;
@@ -37,11 +46,28 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
     return { deploymentId: deployment.id, commitSha: null, tag: null };
   }
 
-  const commitSha = await mergeBranch(
-    attempt.branch,
-    QA_BRANCH,
-    `fix(${LABEL_PREFIX_SLUG}): merge ${attempt.branch} into ${QA_BRANCH}`,
-  );
+  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, attempt.ticketId));
+  const jiraRef = ticket?.jiraKey ? ` [${ticket.jiraKey}]` : "";
+
+  let commitSha: string | null;
+  try {
+    commitSha = await mergeBranch(
+      attempt.branch,
+      QA_BRANCH,
+      `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${attempt.branch} into ${QA_BRANCH}`,
+    );
+  } catch (err) {
+    console.error(`[deploy] GitHub merge failed for ${attempt.branch}: ${(err as Error).message}`);
+    if (ticket?.jiraKey) {
+      await transitionTicket(ticket.jiraKey, "To Do");
+    }
+    await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, attempt.ticketId));
+    const [deployment] = await db
+      .insert(deployments)
+      .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
+      .returning();
+    return { deploymentId: deployment.id, commitSha: null, tag: null };
+  }
   if (!commitSha) {
     console.warn(`[deploy] Merge did not return a commit sha — GitHub may not be configured or branch is missing.`);
   }
@@ -66,9 +92,8 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
 
   await db.update(tickets).set({ status: "done" }).where(eq(tickets.id, attempt.ticketId));
 
-  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, attempt.ticketId));
   if (ticket?.jiraKey) {
-    await transitionTicket(ticket.jiraKey, "In Review");
+    await transitionTicket(ticket.jiraKey, "Done");
   }
 
   return { deploymentId: deployment.id, commitSha, tag };

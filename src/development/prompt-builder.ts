@@ -47,6 +47,20 @@ export async function buildPrompt(ticketId: string): Promise<string> {
     .map((i) => `- ${i.wcagRule} at "${i.selector}" on ${i.pageUrl} (severity: ${i.severity})`)
     .join("\n");
 
+  console.log(`[prompt-builder] Ticket ${ticketId} (${ticket.jiraKey ?? "no-jira-key"}) category="${ticket.category}"`);
+  console.log(`[prompt-builder]   issueIds in ticket: ${(ticket.issueIds as string[]).length}, issues found in DB: ${ticketIssues.length}`);
+  if (ticketIssues.length === 0) {
+    console.warn(`[prompt-builder]   ⚠ No issues resolved from issueIds — the SDK agent will have no findings to act on.`);
+    console.warn(`[prompt-builder]   issueIds: ${JSON.stringify(ticket.issueIds)}`);
+  } else {
+    for (const i of ticketIssues) {
+      console.log(`[prompt-builder]   - ${i.wcagRule} | "${i.selector}" | ${i.pageUrl} (${i.severity})`);
+    }
+  }
+  if (priorFeedback.length > 0) {
+    console.log(`[prompt-builder]   Prior rejected attempts: ${priorFeedback.length}`);
+  }
+
   return [
     `You are fixing an accessibility issue category: "${ticket.category}".`,
     `Findings from the automated scan (WCAG rule, DOM selector, page):`,

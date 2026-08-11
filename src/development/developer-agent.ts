@@ -1,9 +1,10 @@
 import "dotenv/config";
-import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { join, resolve } from "node:path";
+import { rm } from "node:fs/promises";
+import { eq, inArray } from "drizzle-orm";
 import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
-import { tickets, fixAttempts } from "../db/schema.js";
+import { tickets, fixAttempts, issues } from "../db/schema.js";
 import { run } from "../lib/exec.js";
 import { transitionTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT } from "../lib/config.js";
@@ -19,7 +20,7 @@ const GITHUB_REPO = process.env.GITHUB_REPO ?? "";
 const MAX_RETRIES = parseInt(process.env.DEVELOPER_MAX_RETRIES ?? "2", 10);
 
 export interface DeveloperResult {
-  fixAttemptId: string;
+  fixAttemptId: string | null;
   branch: string;
   prUrl: string | null;
 }
@@ -103,7 +104,8 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   const attemptNumber = existingAttempts.length + 1;
 
   const shortId = ticketId.slice(0, 8);
-  const branch = `${LABEL_PREFIX_SLUG}/${shortId}-attempt-${attemptNumber}`;
+  const jiraSlug = ticket?.jiraKey ? `${ticket.jiraKey}-` : "";
+  const branch = `${LABEL_PREFIX_SLUG}/${jiraSlug}${shortId}-attempt-${attemptNumber}`;
   const worktreeDir = join(TARGET_REPO_PATH, "..", `.worktrees`, branch.replace(/\//g, "-"));
 
   // Serialize git worktree creation — git holds a repo-level lock
@@ -115,39 +117,158 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     releaseLock();
   }
 
+  // Early exit if the ticket has no resolvable issues — avoids wasting 5+ min on an empty SDK call
+  const ticketIssues = await db
+    .select()
+    .from(issues)
+    .where(inArray(issues.id, (ticket?.issueIds as string[]) ?? []));
+  if (ticketIssues.length === 0) {
+    console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping SDK agent.`);
+    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+    await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+    const cleanupLock = await gitRepoMutex.acquire();
+    try {
+      await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH);
+    } catch { /* best effort */ } finally { cleanupLock(); }
+    return { fixAttemptId: null, branch, prUrl: null };
+  }
+
   // Claude SDK fix runs unlocked — multiple tickets fix in parallel
   const prompt = await buildPrompt(ticketId);
+  console.log(`[developer] ── SDK agent starting for ticket ${ticketId} on branch ${branch} ──`);
+  console.log(`[developer]   Worktree: ${worktreeDir}`);
+  console.log(`[developer]   Prompt length: ${prompt.length} chars`);
+  const sdkStart = Date.now();
   await runAgentWithRetry(prompt, worktreeDir);
+  const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
+  console.log(`[developer] ── SDK agent finished for ticket ${ticketId} (${sdkDuration}s) ──`);
+
+  // Log raw working tree state before acquiring lock — shows what the SDK
+  // agent actually touched, independent of git add / commit.
+  try {
+    const { stdout: rawStatus } = await run("git", ["status", "--short"], worktreeDir);
+    if (rawStatus.trim()) {
+      console.log(`[developer] Working tree changes after SDK (ticket ${ticketId}):`);
+      for (const line of rawStatus.trim().split("\n")) {
+        console.log(`[developer]   ${line}`);
+      }
+    } else {
+      console.warn(`[developer] Working tree is clean after SDK — no files were modified (ticket ${ticketId}).`);
+    }
+  } catch {
+    console.warn(`[developer] Could not read working tree status for ticket ${ticketId}.`);
+  }
 
   // Re-acquire lock for commit, push, and worktree cleanup
   let commitSha: string | null = null;
+  let pushStatus: "pending" | "pushed" | "failed" = "pending";
   const prUrl: string | null = null;
+  let fixAttemptId: string | null = null;
+
   releaseLock = await gitRepoMutex.acquire();
   try {
+    // Remove Windows reserved device names (nul, con, prn, aux, etc.) that the
+    // Claude SDK agent may have created — they break `git add` on Windows.
     try {
-      await run("git", ["add", "-A"], worktreeDir);
-      await run("git", ["commit", "-m", `fix(${LABEL_PREFIX_SLUG}): ${branch}`], worktreeDir);
+      const { stdout: lsOut } = await run(
+        "git", ["ls-files", "--others", "--exclude-standard"], worktreeDir,
+      );
+      const reserved = /^(nul|con|prn|aux|com[0-9]|lpt[0-9])(\..+)?$/i;
+      for (const f of lsOut.split("\n").map((l) => l.trim()).filter(Boolean)) {
+        if (reserved.test(f.split("/").pop()!)) {
+          console.warn(`[developer] Removing Windows-reserved file: ${f}`);
+          await run("git", ["rm", "-f", "--", f], worktreeDir).catch(() =>
+            rm(resolve(worktreeDir, f), { force: true }).catch(() => {}),
+          );
+        }
+      }
+    } catch {
+      // best-effort cleanup
+    }
+
+    await run("git", ["add", "-A"], worktreeDir);
+
+    const { stdout: statusOut } = await run("git", ["status", "--porcelain"], worktreeDir);
+    if (statusOut.trim().length === 0) {
+      console.warn(`[developer] No file changes detected for ticket ${ticketId} — the SDK agent did not modify any files.`);
+    } else {
+      const changedFiles = statusOut.trim().split("\n");
+      console.log(`[developer] ── Changes by SDK agent on branch ${branch} (${changedFiles.length} file(s)) ──`);
+      for (const line of changedFiles) {
+        console.log(`[developer]   ${line}`);
+      }
+
+      const { stdout: diffStat } = await run("git", ["diff", "--cached", "--stat"], worktreeDir);
+      if (diffStat.trim()) {
+        console.log(`[developer] ── Diff summary ──`);
+        for (const line of diffStat.trim().split("\n")) {
+          console.log(`[developer]   ${line}`);
+        }
+      }
+
+      const jiraRef = ticket?.jiraKey ? ` [${ticket.jiraKey}]` : "";
+      await run("git", ["commit", "-m", `fix(${LABEL_PREFIX_SLUG}):${jiraRef} ${branch}`], worktreeDir);
       const { stdout } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
       commitSha = stdout.trim();
-    } catch (err) {
-      console.warn("[developer] Nothing to commit — likely no changes were made.", err);
+      console.log(`[developer] Committed ${commitSha} on branch ${branch}`);
     }
 
     if (commitSha) {
-      try {
-        if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-          const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
-          await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
-        }
-        await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
-      } catch (err) {
-        console.warn("[developer] Push failed.", err);
+      if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+        const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+        await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
       }
 
+      const PUSH_MAX_RETRIES = 3;
+      for (let pushAttempt = 0; pushAttempt < PUSH_MAX_RETRIES; pushAttempt++) {
+        try {
+          await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
+          pushStatus = "pushed";
+          break;
+        } catch (err) {
+          const isLast = pushAttempt >= PUSH_MAX_RETRIES - 1;
+          if (isLast) {
+            pushStatus = "failed";
+            console.error(`[developer] Push failed after ${PUSH_MAX_RETRIES} attempts for branch ${branch}.`, err);
+            if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+            await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+            throw err;
+          }
+          const delay = Math.min(1000 * 2 ** pushAttempt, 10000);
+          console.warn(`[developer] Push attempt ${pushAttempt + 1} failed, retrying in ${delay / 1000}s...`, (err as Error).message);
+          await new Promise((r) => setTimeout(r, delay));
+        }
+      }
+    }
+
+    // Only create a fix attempt record and advance the ticket if we actually
+    // committed and pushed. Otherwise leave the ticket as "open" so the graph
+    // recovery logic retries it on the next cycle.
+    if (!commitSha) {
+      console.warn(`[developer] No commit produced for ticket ${ticketId} on branch ${branch} — resetting ticket.`);
+      if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+    } else {
+      const [attempt] = await db
+        .insert(fixAttempts)
+        .values({
+          ticketId,
+          branch,
+          commitSha,
+          pushStatus,
+          prUrl,
+          developerAgentRunId: `dev-${Date.now()}`,
+          attemptNumber,
+        })
+        .returning();
+
+      fixAttemptId = attempt.id;
+
+      await db.update(tickets).set({ status: "in_review" }).where(eq(tickets.id, ticketId));
     }
 
     try {
-      await run("git", ["worktree", "remove", worktreeDir], TARGET_REPO_PATH);
+      await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH);
     } catch {
       console.warn(`[developer] Could not remove worktree at ${worktreeDir} — clean up manually.`);
     }
@@ -155,19 +276,5 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     releaseLock();
   }
 
-  const [attempt] = await db
-    .insert(fixAttempts)
-    .values({
-      ticketId,
-      branch,
-      commitSha,
-      prUrl,
-      developerAgentRunId: `dev-${Date.now()}`,
-      attemptNumber,
-    })
-    .returning();
-
-  await db.update(tickets).set({ status: "in_review" }).where(eq(tickets.id, ticketId));
-
-  return { fixAttemptId: attempt.id, branch, prUrl };
+  return { fixAttemptId, branch, prUrl };
 }
