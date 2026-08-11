@@ -1,71 +1,94 @@
 /**
- * LangGraph orchestrator — implements the pipeline:
+ * LangGraph orchestrator — single-branch batch pipeline:
  *
- *   scan (Playwright + axe) -> triage (from reports) -> [open tickets?]
- *     yes -> fan out one branch per ticket: developer -> reviewer ->
- *            (rejected, attempt<2 -> back to developer)
- *            (rejected twice -> park, handled inside reviewer agent, branch ends)
- *            (approved, scope-flagged -> flag, handled inside reviewer agent, branch ends)
- *            (approved, clean -> deploy, branch ends)
- *     -> loop back to scan
- *     no  -> release (single human checkpoint)
+ *   scan → triage → [open tickets?]
+ *     yes → prepareBranch (one branch for all tickets)
+ *         → fixNext (developer fixes one ticket, commits) → [more tickets?]
+ *             yes → fixNext (loop)
+ *             no  → pushBranch → reviewer (reviews entire branch)
+ *                   → [approved?]
+ *                     yes → deploy (merges branch into QA) → cleanup → scan
+ *                     no  → autofix (fix build errors) → reviewer (retry, up to MAX_REVIEW_RETRIES)
+ *                           → still failing → cleanup → scan
+ *     no tickets after fresh scan → release
  */
 import "dotenv/config";
-import { StateGraph, Annotation, Send, START, END } from "@langchain/langgraph";
+import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
-import { desc } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { tickets, iterationCycles, fixAttempts, reviewResults } from "../db/schema.js";
-import { inArray, eq, and } from "drizzle-orm";
+import { tickets, iterationCycles } from "../db/schema.js";
+import { eq, and, inArray } from "drizzle-orm";
 import { triageFromReports } from "../triage/triage-from-reports.js";
-import { runDeveloperAgent } from "../development/developer-agent.js";
-import { runReviewerAgent } from "../review/reviewer-agent.js";
-import { runDeployAgent } from "../deploy/deploy-agent.js";
+import { fixTicketOnBranch, fixBuildErrors, type BatchFixResult } from "../development/developer-agent.js";
+import { reviewBranch } from "../review/reviewer-agent.js";
+import { deployBranch } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
 import { ensureEpic } from "../integrations/jira.js";
 import { withSpan } from "../integrations/observability.js";
 import { run } from "../lib/exec.js";
+import { gitRepoMutex } from "../lib/mutex.js";
+import { LABEL_PREFIX_SLUG } from "../lib/config.js";
 import { traceable } from "langsmith/traceable";
+import { join } from "node:path";
 import path from "node:path";
 
 const MAX_CYCLES = 20;
+const MAX_REVIEW_RETRIES = parseInt(process.env.MAX_REVIEW_RETRIES ?? "2", 10);
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
+const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
+const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
+const GITHUB_OWNER = process.env.GITHUB_OWNER ?? "";
+const GITHUB_REPO = process.env.GITHUB_REPO ?? "";
 
 const CycleState = Annotation.Root({
   cycleId: Annotation<string>,
   cycleNumber: Annotation<number>,
   epicKey: Annotation<string | null>,
-  ticketId: Annotation<string | null>,
-  fixAttemptId: Annotation<string | null>({
+  branch: Annotation<string | null>({
     reducer: (_prev, next) => next,
     default: () => null,
+  }),
+  worktreeDir: Annotation<string | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  openTicketIds: Annotation<string[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
+  fixedTicketIds: Annotation<string[]>({
+    reducer: (_prev, next) => next,
+    default: () => [],
+  }),
+  currentTicketIndex: Annotation<number>({
+    reducer: (_prev, next) => next,
+    default: () => 0,
   }),
   reviewVerdict: Annotation<"approved" | "rejected" | null>({
     reducer: (_prev, next) => next,
     default: () => null,
   }),
-  scopeGuardFlagged: Annotation<boolean>({
+  reviewComments: Annotation<string | null>({
     reducer: (_prev, next) => next,
-    default: () => false,
+    default: () => null,
   }),
-  shouldRetry: Annotation<boolean>({
+  retryCount: Annotation<number>({
     reducer: (_prev, next) => next,
-    default: () => false,
+    default: () => 0,
   }),
-});
-
-const TicketState = Annotation.Root({
-  ticketId: Annotation<string>,
-  epicKey: Annotation<string | null>,
+  freshScan: Annotation<boolean>({
+    reducer: (_prev, next) => next,
+    default: () => true,
+  }),
 });
 
 const DEPLOY_SETTLE_MS = parseInt(process.env.DEPLOY_SETTLE_MS ?? "60000", 10);
 
+// ── Nodes ──────────────────────────────────────────────────────────────────
+
 async function scanNode(state: typeof CycleState.State) {
   return withSpan("scan.playwright", async () => {
-    // Wait for CI/CD to deploy the merged code before rescanning — without
-    // this, the scan runs against the old build and re-creates tickets for
-    // issues that were just fixed.
     if (state.cycleNumber > 0) {
       console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
       await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
@@ -82,7 +105,7 @@ async function scanNode(state: typeof CycleState.State) {
       console.warn("[orchestrate] Report generation had issues:", (err as Error).message.slice(0, 300));
     }
     console.log("[orchestrate] Scan complete.");
-    return { cycleNumber: state.cycleNumber + 1 };
+    return { cycleNumber: state.cycleNumber + 1, freshScan: true };
   });
 }
 
@@ -96,177 +119,231 @@ async function triageNode(state: typeof CycleState.State) {
   });
 }
 
-async function routeAfterTriage(state: typeof CycleState.State) {
+function routeAfterTriage(state: typeof CycleState.State) {
+  if (state.cycleNumber >= MAX_CYCLES) {
+    console.log(`[orchestrate] Max cycles reached — moving to release.`);
+    return "release";
+  }
+  return "prepareBranch";
+}
+
+async function prepareBranchNode(state: typeof CycleState.State) {
   const epicKey = state.epicKey;
 
-  // 1. Recover stale "in_review" tickets from a previous crashed run
-  const staleTickets = epicKey
-    ? await db.select().from(tickets).where(and(eq(tickets.status, "in_review"), eq(tickets.epicKey, epicKey)))
-    : await db.select().from(tickets).where(eq(tickets.status, "in_review"));
-
-  const sends: Send[] = [];
-
-  for (const ticket of staleTickets) {
-    const [latestAttempt] = await db
-      .select()
-      .from(fixAttempts)
-      .where(eq(fixAttempts.ticketId, ticket.id))
-      .orderBy(desc(fixAttempts.createdAt))
-      .limit(1);
-
-    if (!latestAttempt) {
-      // Has no fix attempt — reset to open so developer picks it up
-      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticket.id));
-      console.log(`[orchestrate] Recovered ticket ${ticket.jiraKey ?? ticket.id} — no fix attempt, reset to open.`);
-      continue;
-    }
-
-    const [review] = await db
-      .select()
-      .from(reviewResults)
-      .where(eq(reviewResults.fixAttemptId, latestAttempt.id));
-
-    if (!review) {
-      // Has fix attempt but no review — send to reviewer
-      console.log(`[orchestrate] Recovered ticket ${ticket.jiraKey ?? ticket.id} — fix attempt exists, sending to reviewer.`);
-      sends.push(new Send("reviewer", { ticketId: ticket.id, epicKey, fixAttemptId: latestAttempt.id }));
-    } else if (review.verdict === "approved" && !review.scopeGuardFlagged) {
-      // Reviewed and approved but never deployed — send to deploy
-      console.log(`[orchestrate] Recovered ticket ${ticket.jiraKey ?? ticket.id} — approved but not deployed, sending to deploy.`);
-      sends.push(new Send("deploy", { ticketId: ticket.id, epicKey, fixAttemptId: latestAttempt.id }));
-    } else {
-      // Reviewed but rejected/flagged — reset to open for retry
-      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticket.id));
-      console.log(`[orchestrate] Recovered ticket ${ticket.jiraKey ?? ticket.id} — review ${review.verdict}, reset to open.`);
-    }
-  }
-
-  // 2. Pick up new "open" tickets as before
   const openTickets = epicKey
     ? await db.select().from(tickets).where(and(eq(tickets.status, "open"), eq(tickets.epicKey, epicKey)))
     : await db.select().from(tickets).where(eq(tickets.status, "open"));
 
-  if (openTickets.length === 0 && sends.length === 0) {
-    if (state.cycleNumber >= MAX_CYCLES) {
-      console.log(`[orchestrate] Max cycles reached — moving to release.`);
-    } else {
-      console.log(`[orchestrate] No open or in-progress tickets — moving to release.`);
+  if (openTickets.length === 0) {
+    console.log(`[orchestrate] No open tickets found.`);
+    return { openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0, branch: null, worktreeDir: null };
+  }
+
+  const ticketIds = openTickets.map((t) => t.id);
+  const jiraKeys = openTickets.map((t) => t.jiraKey).filter(Boolean);
+  const branchLabel = jiraKeys.length > 0 ? jiraKeys.join("-") : ticketIds[0].slice(0, 8);
+  const branch = `${LABEL_PREFIX_SLUG}/batch-${branchLabel}-${Date.now()}`;
+  const worktreeDir = join(TARGET_REPO_PATH, "..", ".worktrees", branch.replace(/\//g, "-"));
+
+  const releaseLock = await gitRepoMutex.acquire();
+  try {
+    await run("git", ["fetch", "origin", QA_BRANCH], TARGET_REPO_PATH);
+    const startPoint = `origin/${QA_BRANCH}`;
+    try {
+      await run("git", ["worktree", "add", "-b", branch, worktreeDir, startPoint], TARGET_REPO_PATH);
+    } catch (err) {
+      const msg = (err as Error).message;
+      if (msg.includes("already exists")) {
+        try { await run("git", ["worktree", "remove", worktreeDir, "--force"], TARGET_REPO_PATH); } catch {}
+        try { await run("git", ["branch", "-D", branch], TARGET_REPO_PATH); } catch {}
+        await run("git", ["worktree", "add", "-b", branch, worktreeDir, startPoint], TARGET_REPO_PATH);
+      } else {
+        throw err;
+      }
     }
-    return "release";
+  } finally {
+    releaseLock();
   }
 
-  if (state.cycleNumber >= MAX_CYCLES) {
-    console.log(`[orchestrate] Max cycles reached — moving to release (${openTickets.length} open, ${sends.length} recovered).`);
-    return "release";
-  }
-
-  for (const t of openTickets) {
-    sends.push(new Send("developer", { ticketId: t.id, epicKey: state.epicKey }));
-  }
-
-  console.log(`[orchestrate] ${openTickets.length} open + ${staleTickets.length} recovered ticket(s) — fanning out.`);
-  return sends;
+  console.log(`[orchestrate] Created branch ${branch} for ${openTickets.length} ticket(s): ${jiraKeys.join(", ") || ticketIds.map((id) => id.slice(0, 8)).join(", ")}`);
+  return { openTicketIds: ticketIds, fixedTicketIds: [], currentTicketIndex: 0, branch, worktreeDir };
 }
 
-async function developerNode(state: typeof TicketState.State) {
+function routeAfterPrepareBranch(state: typeof CycleState.State) {
+  if (state.openTicketIds.length === 0) {
+    if (state.freshScan) {
+      console.log(`[orchestrate] No open tickets after fresh scan — moving to release.`);
+      return "release";
+    }
+    console.log(`[orchestrate] All tickets processed — rescanning for new issues.`);
+    return "scan";
+  }
+  return "fixNext";
+}
+
+async function fixNextNode(state: typeof CycleState.State) {
+  const ticketId = state.openTicketIds[state.currentTicketIndex];
+  const total = state.openTicketIds.length;
+  const current = state.currentTicketIndex + 1;
+
   return withSpan("agent.developer", async () => {
-    console.log(`[orchestrate] Running developer agent on ticket ${state.ticketId}...`);
-    const { fixAttemptId } = await runDeveloperAgent(state.ticketId);
-    console.log(`[orchestrate] Developer done — fix attempt ${fixAttemptId}.`);
-    return { fixAttemptId } as any;
+    console.log(`[orchestrate] Fixing ticket ${current}/${total}: ${ticketId.slice(0, 8)}...`);
+    const result: BatchFixResult = await fixTicketOnBranch(ticketId, state.worktreeDir!);
+
+    const newFixed = result.commitSha
+      ? [...state.fixedTicketIds, ticketId]
+      : state.fixedTicketIds;
+
+    if (result.commitSha) {
+      console.log(`[orchestrate] ✓ ${result.jiraKey ?? ticketId.slice(0, 8)} committed: ${result.commitSha.slice(0, 7)}`);
+    } else {
+      console.warn(`[orchestrate] ✗ ${result.jiraKey ?? ticketId.slice(0, 8)} — no changes produced.`);
+    }
+
+    return { fixedTicketIds: newFixed, currentTicketIndex: state.currentTicketIndex + 1 };
   });
 }
 
-function routeDevToReviewer(state: any) {
-  if (!state.fixAttemptId) {
-    console.log(`[orchestrate] Developer produced no commit for ticket ${state.ticketId} — skipping reviewer.`);
-    return END;
+function routeAfterFix(state: typeof CycleState.State) {
+  if (state.currentTicketIndex < state.openTicketIds.length) {
+    return "fixNext";
   }
-  return new Send("reviewer", {
-    ticketId: state.ticketId,
-    epicKey: state.epicKey,
-    fixAttemptId: state.fixAttemptId,
-  });
+  if (state.fixedTicketIds.length === 0) {
+    console.log(`[orchestrate] No tickets produced commits — skipping review.`);
+    return "cleanup";
+  }
+  return "pushBranch";
 }
 
-async function reviewerNode(state: any) {
+async function pushBranchNode(state: typeof CycleState.State) {
+  const releaseLock = await gitRepoMutex.acquire();
+  try {
+    if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+      const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+      await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
+    }
+    await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
+    console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
+  } finally {
+    releaseLock();
+  }
+  return {};
+}
+
+async function reviewerNode(state: typeof CycleState.State) {
   return withSpan("agent.reviewer", async () => {
-    console.log(`[orchestrate] Running reviewer on fix attempt ${state.fixAttemptId}...`);
-    const result = await runReviewerAgent(state.fixAttemptId);
-    console.log(`[orchestrate] Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""}.`);
-    return {
-      reviewVerdict: result.verdict,
-      scopeGuardFlagged: result.scopeGuardFlagged,
-      fixAttemptId: state.fixAttemptId,
-      ticketId: state.ticketId,
-      epicKey: state.epicKey,
-    } as any;
+    console.log(`[orchestrate] Reviewing branch ${state.branch} (${state.fixedTicketIds.length} ticket(s))...`);
+    const result = await reviewBranch(state.worktreeDir!, state.fixedTicketIds);
+    console.log(`[orchestrate] Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""}`);
+    return { reviewVerdict: result.verdict, reviewComments: result.comments };
   });
 }
 
-function routeAfterReview(state: any) {
+function routeAfterReview(state: typeof CycleState.State) {
+  if (state.reviewVerdict === "approved") {
+    return "deploy";
+  }
+  if (state.retryCount < MAX_REVIEW_RETRIES) {
+    console.log(`[orchestrate] Review rejected (attempt ${state.retryCount + 1}/${MAX_REVIEW_RETRIES}) — sending back to autofix.`);
+    return "autofix";
+  }
+  console.log(`[orchestrate] Review rejected after ${MAX_REVIEW_RETRIES} retries — giving up.`);
+  return "cleanup";
+}
+
+async function autofixNode(state: typeof CycleState.State) {
+  return withSpan("agent.developer.autofix", async () => {
+    console.log(`[orchestrate] Autofixing build errors (retry ${state.retryCount + 1}/${MAX_REVIEW_RETRIES})...`);
+    const commitSha = await fixBuildErrors(state.worktreeDir!, state.reviewComments ?? "Build failed");
+
+    if (commitSha) {
+      console.log(`[orchestrate] Autofix committed: ${commitSha.slice(0, 7)} — re-pushing...`);
+      const releaseLock = await gitRepoMutex.acquire();
+      try {
+        if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+          const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+          await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
+        }
+        await run("git", ["-c", "credential.helper=", "push", "origin", state.branch!], state.worktreeDir!);
+      } finally {
+        releaseLock();
+      }
+    } else {
+      console.warn(`[orchestrate] Autofix made no changes.`);
+    }
+
+    return { retryCount: state.retryCount + 1 };
+  });
+}
+
+async function deployNode(state: typeof CycleState.State) {
+  return withSpan("agent.deploy", async () => {
+    console.log(`[orchestrate] Deploying branch ${state.branch}...`);
+    const result = await deployBranch(state.branch!, state.fixedTicketIds);
+    console.log(`[orchestrate] Deploy complete — ${result.ticketsDeployed} ticket(s) merged.`);
+    return { freshScan: false };
+  });
+}
+
+async function cleanupNode(state: typeof CycleState.State) {
+  if (!state.worktreeDir) return {};
+  const releaseLock = await gitRepoMutex.acquire();
+  try {
+    await run("git", ["worktree", "remove", "--force", state.worktreeDir], TARGET_REPO_PATH);
+  } catch {
+    console.warn(`[orchestrate] Could not remove worktree at ${state.worktreeDir}.`);
+  } finally {
+    releaseLock();
+  }
+
+  // Reset unfixed tickets back to open
   if (state.reviewVerdict === "rejected") {
-    const ticketId = state.ticketId;
-    return new Send("routeRejection", { ticketId, epicKey: state.epicKey, fixAttemptId: state.fixAttemptId });
+    for (const ticketId of state.fixedTicketIds) {
+      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+    }
   }
-  if (state.scopeGuardFlagged) return END;
-  if (!state.fixAttemptId) {
-    console.log(`[orchestrate] No fix attempt to deploy — skipping deploy.`);
-    return END;
-  }
-  return new Send("deploy", {
-    ticketId: state.ticketId,
-    epicKey: state.epicKey,
-    fixAttemptId: state.fixAttemptId,
+
+  return { branch: null, worktreeDir: null, openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0 };
+}
+
+function routeAfterCleanup(state: typeof CycleState.State) {
+  return "scan";
+}
+
+async function releaseNode(state: typeof CycleState.State) {
+  return withSpan("agent.release", async () => {
+    console.log(`[orchestrate] Running release for cycle ${state.cycleId}...`);
+    await db.update(iterationCycles).set({ endedAt: new Date() }).where(eq(iterationCycles.id, state.cycleId));
+    await runReleaseAgent(state.cycleId);
+    console.log(`[orchestrate] Release complete.`);
+    return {};
   });
 }
 
-async function routeRejectionNode(state: any) {
-  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, state.ticketId));
-  if (ticket?.status === "open") {
-    return { shouldRetry: true, ticketId: state.ticketId, epicKey: state.epicKey } as any;
-  }
-  return { shouldRetry: false } as any;
-}
-
-function routeRejectionEdge(state: any) {
-  if (state.shouldRetry) {
-    return new Send("developer", { ticketId: state.ticketId, epicKey: state.epicKey });
-  }
-  return END;
-}
+// ── Graph ──────────────────────────────────────────────────────────────────
 
 export function buildGraph() {
   const graph = new StateGraph(CycleState)
     .addNode("scan", scanNode)
     .addNode("triage", triageNode)
-    .addNode("developer", developerNode as any)
-    .addNode("reviewer", reviewerNode as any)
-    .addNode("routeRejection", routeRejectionNode as any)
-    .addNode("deploy", async (state: any) =>
-      withSpan("agent.deploy", async () => {
-        console.log(`[orchestrate] Running deploy on fix attempt ${state.fixAttemptId}...`);
-        await runDeployAgent(state.fixAttemptId);
-        console.log(`[orchestrate] Deploy complete.`);
-        return {};
-      }),
-    )
-    .addNode("release", async (state: typeof CycleState.State) =>
-      withSpan("agent.release", async () => {
-        console.log(`[orchestrate] Running release for cycle ${state.cycleId}...`);
-        await db.update(iterationCycles).set({ endedAt: new Date() }).where(eq(iterationCycles.id, state.cycleId));
-        await runReleaseAgent(state.cycleId);
-        console.log(`[orchestrate] Release complete.`);
-        return {};
-      }),
-    )
+    .addNode("prepareBranch", prepareBranchNode)
+    .addNode("fixNext", fixNextNode)
+    .addNode("pushBranch", pushBranchNode)
+    .addNode("reviewer", reviewerNode)
+    .addNode("autofix", autofixNode)
+    .addNode("deploy", deployNode)
+    .addNode("cleanup", cleanupNode)
+    .addNode("release", releaseNode)
     .addEdge(START, "scan")
     .addEdge("scan", "triage")
-    .addConditionalEdges("triage", routeAfterTriage, ["developer", "reviewer", "deploy", "release"])
-    .addConditionalEdges("developer", routeDevToReviewer, ["reviewer", END])
-    .addConditionalEdges("reviewer", routeAfterReview, ["routeRejection", "deploy", END])
-    .addConditionalEdges("routeRejection", routeRejectionEdge, ["developer", END])
-    .addEdge("deploy", "scan")
+    .addConditionalEdges("triage", routeAfterTriage, ["prepareBranch", "release"])
+    .addConditionalEdges("prepareBranch", routeAfterPrepareBranch, ["fixNext", "release", "scan"])
+    .addConditionalEdges("fixNext", routeAfterFix, ["fixNext", "pushBranch", "cleanup"])
+    .addEdge("pushBranch", "reviewer")
+    .addConditionalEdges("reviewer", routeAfterReview, ["deploy", "autofix", "cleanup"])
+    .addEdge("autofix", "reviewer")
+    .addEdge("deploy", "cleanup")
+    .addConditionalEdges("cleanup", routeAfterCleanup, ["scan"])
     .addEdge("release", END);
 
   return graph;
@@ -289,10 +366,23 @@ async function _runOrchestratorCycle() {
     .returning();
 
   console.log(`[orchestrate] Starting pipeline — cycle ${cycle.id}`);
-  console.log(`[orchestrate] Flow: scan → triage → developer → reviewer → deploy → release`);
+  console.log(`[orchestrate] Flow: scan → triage → prepareBranch → fix (all tickets) → push → review → deploy → release`);
 
   await compiled.invoke(
-    { cycleId: cycle.id, cycleNumber: 0, epicKey: null, ticketId: null, fixAttemptId: null, reviewVerdict: null, scopeGuardFlagged: false },
+    {
+      cycleId: cycle.id,
+      cycleNumber: 0,
+      epicKey: null,
+      branch: null,
+      worktreeDir: null,
+      openTicketIds: [],
+      fixedTicketIds: [],
+      currentTicketIndex: 0,
+      reviewVerdict: null,
+      reviewComments: null,
+      retryCount: 0,
+      freshScan: true,
+    },
     { configurable: { thread_id: cycle.id } },
   );
 }

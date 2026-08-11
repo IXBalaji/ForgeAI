@@ -4,9 +4,9 @@ import { Command } from "commander";
 import { runScannerAgent, type AuthRole } from "../scan/scanner-agent.js";
 import { runTriageAgent } from "../triage/triage-agent.js";
 import { triageFromReports } from "../triage/triage-from-reports.js";
-import { runDeveloperAgent, type DeveloperResult } from "../development/developer-agent.js";
-import { runReviewerAgent, type ReviewerVerdict } from "../review/reviewer-agent.js";
-import { runDeployAgent, type DeployResult } from "../deploy/deploy-agent.js";
+import { runDeveloperAgent, fixTicketOnBranch, type DeveloperResult, type BatchFixResult } from "../development/developer-agent.js";
+import { runReviewerAgent, reviewBranch, type ReviewerVerdict, type BranchReviewVerdict } from "../review/reviewer-agent.js";
+import { runDeployAgent, deployBranch, type DeployResult, type BranchDeployResult } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
 import { ensureEpic } from "../integrations/jira.js";
 import { runOrchestratorCycle } from "../orchestrator/graph.js";
@@ -150,11 +150,22 @@ program
 
 program
   .command("fix:all")
-  .description("Run the developer agent on all open tickets in the local DB")
+  .description("Fix all open tickets on a single branch, review once, deploy once")
   .option("--limit <n>", "max tickets to process", "10")
   .action(async (opts) => {
     const { inArray } = await import("drizzle-orm");
-    const { tickets } = await import("../db/schema.js");
+    const { join } = await import("node:path");
+    const { tickets, issues } = await import("../db/schema.js");
+    const { gitRepoMutex } = await import("../lib/mutex.js");
+    const { LABEL_PREFIX_SLUG } = await import("../lib/config.js");
+    const { run } = await import("../lib/exec.js");
+
+    const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
+    const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
+    const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
+    const GITHUB_OWNER = process.env.GITHUB_OWNER ?? "";
+    const GITHUB_REPO = process.env.GITHUB_REPO ?? "";
+
     const openTickets = await db
       .select()
       .from(tickets)
@@ -166,9 +177,9 @@ program
       return;
     }
 
-    const { issues } = await import("../db/schema.js");
-    const maxRetries = 2;
-    console.log(`[fix:all] Found ${openTickets.length} open ticket(s)\n`);
+    console.log(`[fix:all] Found ${openTickets.length} open ticket(s) — creating single branch\n`);
+
+    // Log ticket details
     for (const ticket of openTickets) {
       const issueIds = (ticket.issueIds as string[]) ?? [];
       const resolvedIssues = issueIds.length > 0
@@ -176,74 +187,91 @@ program
         : [];
       console.log(`[fix:all] ── Ticket ${ticket.id} (${ticket.jiraKey ?? "no jira key"}) ──`);
       console.log(`[fix:all]   category: ${ticket.category}`);
-      console.log(`[fix:all]   status: ${ticket.status}`);
       console.log(`[fix:all]   issueIds: ${issueIds.length} stored, ${resolvedIssues.length} found in DB`);
-      if (resolvedIssues.length > 0) {
-        for (const iss of resolvedIssues) {
-          console.log(`[fix:all]     - ${iss.wcagRule} | "${iss.selector}" | ${iss.pageUrl} (${iss.severity})`);
-        }
-      } else if (issueIds.length > 0) {
-        console.log(`[fix:all]   ⚠ issueIds reference missing rows: ${JSON.stringify(issueIds.slice(0, 5))}${issueIds.length > 5 ? "..." : ""}`);
-      } else {
-        console.log(`[fix:all]   ⚠ ticket has empty issueIds array`);
-      }
+    }
 
-      // Stage 1: Developer agent
-      let devResult: DeveloperResult | null = null;
-      let succeeded = false;
-      for (let retry = 0; retry <= maxRetries && !succeeded; retry++) {
-        try {
-          if (retry > 0) console.log(`[fix:all] Retrying developer agent (attempt ${retry + 1}/${maxRetries + 1})`);
-          devResult = await withSpan("agent.developer", () => runDeveloperAgent(ticket.id));
-          console.log(`[fix:all] Developer done:`, JSON.stringify(devResult, null, 2));
-          succeeded = true;
-        } catch (err) {
-          console.error(`[fix:all] Developer failed: ${(err as Error).message}`);
-          if (retry < maxRetries) {
-            const delay = Math.min(2000 * 2 ** retry, 15000);
-            console.log(`[fix:all] Waiting ${delay / 1000}s before retry...`);
-            await new Promise((r) => setTimeout(r, delay));
-          }
-        }
-      }
-      if (!succeeded || !devResult) {
-        console.error(`[fix:all] Gave up on ticket ${ticket.id} after ${maxRetries + 1} developer attempts`);
-        continue;
-      }
-      if (!devResult.fixAttemptId) {
-        console.warn(`[fix:all] Developer produced no commit for ticket ${ticket.id} — skipping review/deploy.`);
-        continue;
-      }
-      const fixAttemptId = devResult.fixAttemptId;
+    // Stage 1: Create a single branch
+    const jiraKeys = openTickets.map((t) => t.jiraKey).filter(Boolean);
+    const branchLabel = jiraKeys.length > 0 ? jiraKeys.join("-") : openTickets[0].id.slice(0, 8);
+    const branch = `${LABEL_PREFIX_SLUG}/batch-${branchLabel}-${Date.now()}`;
+    const worktreeDir = join(TARGET_REPO_PATH, "..", ".worktrees", branch.replace(/\//g, "-"));
 
-      // Stage 2: Reviewer agent
-      let reviewResult: ReviewerVerdict | null = null;
+    let releaseLock = await gitRepoMutex.acquire();
+    try {
+      await run("git", ["fetch", "origin", QA_BRANCH], TARGET_REPO_PATH);
+      await run("git", ["worktree", "add", "-b", branch, worktreeDir, `origin/${QA_BRANCH}`], TARGET_REPO_PATH);
+    } finally {
+      releaseLock();
+    }
+    console.log(`[fix:all] Branch: ${branch}\n`);
+
+    // Stage 2: Fix each ticket on the shared branch
+    const fixedTicketIds: string[] = [];
+    for (let i = 0; i < openTickets.length; i++) {
+      const ticket = openTickets[i];
+      console.log(`\n[fix:all] ── Fixing ticket ${i + 1}/${openTickets.length}: ${ticket.jiraKey ?? ticket.id.slice(0, 8)} ──`);
       try {
-        console.log(`[fix:all] Running reviewer on fix attempt ${fixAttemptId}...`);
-        reviewResult = await withSpan("agent.reviewer", () => runReviewerAgent(fixAttemptId));
-        console.log(`[fix:all] Reviewer verdict:`, JSON.stringify(reviewResult, null, 2));
+        const result: BatchFixResult = await withSpan("agent.developer", () => fixTicketOnBranch(ticket.id, worktreeDir));
+        if (result.commitSha) {
+          fixedTicketIds.push(ticket.id);
+          console.log(`[fix:all] ✓ Committed: ${result.commitSha.slice(0, 7)}`);
+        } else {
+          console.warn(`[fix:all] ✗ No changes produced`);
+        }
       } catch (err) {
-        console.error(`[fix:all] Reviewer failed: ${(err as Error).message}`);
-        continue;
+        console.error(`[fix:all] Developer failed for ${ticket.jiraKey ?? ticket.id.slice(0, 8)}: ${(err as Error).message}`);
       }
+    }
 
-      if (reviewResult.verdict !== "approved") {
-        console.log(`[fix:all] Reviewer rejected — skipping deploy for ticket ${ticket.id}`);
-        continue;
-      }
-      if (reviewResult.scopeGuardFlagged) {
-        console.log(`[fix:all] Scope guard flagged — holding ticket ${ticket.id} for manual review`);
-        continue;
-      }
+    if (fixedTicketIds.length === 0) {
+      console.log("\n[fix:all] No tickets produced commits — cleaning up.");
+      releaseLock = await gitRepoMutex.acquire();
+      try { await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH); } catch {} finally { releaseLock(); }
+      return;
+    }
 
-      // Stage 3: Deploy agent (merge PR + tag)
-      try {
-        console.log(`[fix:all] Running deploy on fix attempt ${fixAttemptId}...`);
-        const deployResult: DeployResult = await withSpan("agent.deploy", () => runDeployAgent(fixAttemptId));
-        console.log(`[fix:all] Deploy done:`, JSON.stringify(deployResult, null, 2));
-      } catch (err) {
-        console.error(`[fix:all] Deploy failed: ${(err as Error).message}`);
+    // Stage 3: Push the branch
+    releaseLock = await gitRepoMutex.acquire();
+    try {
+      if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+        const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+        await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
       }
+      await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
+      console.log(`\n[fix:all] Pushed branch with ${fixedTicketIds.length} fix commit(s).`);
+    } finally {
+      releaseLock();
+    }
+
+    // Stage 4: Review entire branch
+    console.log(`\n[fix:all] Running reviewer on entire branch...`);
+    let branchReview: BranchReviewVerdict;
+    try {
+      branchReview = await withSpan("agent.reviewer", () => reviewBranch(worktreeDir, fixedTicketIds));
+      console.log(`[fix:all] Reviewer verdict: ${branchReview.verdict}`);
+    } catch (err) {
+      console.error(`[fix:all] Reviewer failed: ${(err as Error).message}`);
+      releaseLock = await gitRepoMutex.acquire();
+      try { await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH); } catch {} finally { releaseLock(); }
+      return;
+    }
+
+    // Cleanup worktree (review is done, deploy uses GitHub API)
+    releaseLock = await gitRepoMutex.acquire();
+    try { await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH); } catch {} finally { releaseLock(); }
+
+    if (branchReview.verdict !== "approved") {
+      console.log(`[fix:all] Reviewer rejected — all ${fixedTicketIds.length} ticket(s) remain open.`);
+      return;
+    }
+
+    // Stage 5: Deploy — merge the single branch
+    console.log(`\n[fix:all] Deploying branch ${branch}...`);
+    try {
+      const result: BranchDeployResult = await withSpan("agent.deploy", () => deployBranch(branch, fixedTicketIds));
+      console.log(`[fix:all] Deploy done:`, JSON.stringify(result, null, 2));
+    } catch (err) {
+      console.error(`[fix:all] Deploy failed: ${(err as Error).message}`);
     }
   });
 
@@ -330,8 +358,21 @@ program
   });
 
 program
+  .command("cost-report")
+  .description("Show AI token usage and cost breakdown from LangSmith traces")
+  .option("--days <n>", "lookback period in days", "7")
+  .option("--project <name>", "LangSmith project name (defaults to LANGSMITH_PROJECT env var)")
+  .action(async (opts) => {
+    const { generateCostReport } = await import("../observability/cost-report.js");
+    await generateCostReport({
+      days: parseInt(opts.days),
+      project: opts.project,
+    });
+  });
+
+program
   .command("orchestrate")
-  .description("Run the full autonomous LangGraph cycle: scan -> triage:reports -> sync:jira -> fix -> review -> deploy -> loop -> release")
+  .description("Run the full autonomous LangGraph cycle: scan -> triage -> fix (one ticket at a time) -> review -> deploy -> next ticket -> release")
   .action(async () => {
     await runOrchestratorCycle();
   });

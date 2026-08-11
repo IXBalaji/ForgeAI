@@ -2,7 +2,7 @@ import "dotenv/config";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
 import { eq, inArray } from "drizzle-orm";
-import { traceable } from "langsmith/traceable";
+import { traceable, getCurrentRunTree } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { tickets, issues, fixAttempts } from "../db/schema.js";
 import { run } from "../lib/exec.js";
@@ -39,6 +39,7 @@ export interface ConflictResolveResult {
 export const resolveConflicts = traceable(_resolveConflicts, {
   name: "conflict-resolver",
   run_type: "chain",
+  metadata: { model: DEVELOPER_MODEL },
 });
 
 async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveResult> {
@@ -402,6 +403,24 @@ async function _runConflictAgent(
             "[conflict-resolver]",
             JSON.stringify((message as any).message?.content ?? message),
           );
+        }
+        if ((message as any).type === "result") {
+          try {
+            const r = message as any;
+            const runTree = getCurrentRunTree();
+            const usage = r.usage;
+            if (usage) {
+              const inputTokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+              (runTree as any).prompt_tokens = inputTokens;
+              (runTree as any).completion_tokens = usage.output_tokens ?? 0;
+              (runTree as any).total_tokens = inputTokens + (usage.output_tokens ?? 0);
+              runTree.outputs = { total_cost_usd: r.total_cost_usd, model_breakdown: r.modelUsage };
+              const modelNames = Object.keys(r.modelUsage ?? {});
+              if (modelNames.length > 0) {
+                runTree.extra = { ...runTree.extra, metadata: { ...(runTree.extra?.metadata as Record<string, unknown> ?? {}), ls_model_name: modelNames[0], ls_provider: "anthropic", sdk_total_cost_usd: r.total_cost_usd } };
+              }
+            }
+          } catch { /* best effort */ }
         }
       }
       return;

@@ -1,4 +1,4 @@
-import { traceable } from "langsmith/traceable";
+import { traceable, getCurrentRunTree } from "langsmith/traceable";
 import { run } from "../lib/exec.js";
 import { REVIEWER_MODEL, REVIEWER_EFFORT } from "../lib/config.js";
 
@@ -13,7 +13,11 @@ const QA_BRANCH = `origin/${process.env.GITHUB_QA_BRANCH ?? "qa"}`;
  * LangSmith's automatic LangGraph tracing) shows up nested under the
  * Reviewer node's run with its full diff-in/verdict-out.
  */
-export const adversarialReview = traceable(_adversarialReview, { name: "adversarial-review-sdk-call", run_type: "llm" });
+export const adversarialReview = traceable(_adversarialReview, {
+  name: "adversarial-review-sdk-call",
+  run_type: "llm",
+  metadata: { model: REVIEWER_MODEL, ls_model_name: REVIEWER_MODEL, ls_provider: "anthropic" },
+});
 
 async function _adversarialReview(worktreeDir: string): Promise<string | null> {
   if (!process.env.ANTHROPIC_API_KEY) return null;
@@ -46,6 +50,9 @@ async function _adversarialReview(worktreeDir: string): Promise<string | null> {
       if ((message as any).type === "assistant") {
         reviewText += JSON.stringify((message as any).message?.content ?? "");
       }
+      if ((message as any).type === "result") {
+        attachSdkUsage(message as any);
+      }
     }
     const isLgtm = /LGTM/i.test(reviewText);
     if (isLgtm) return null;
@@ -55,4 +62,31 @@ async function _adversarialReview(worktreeDir: string): Promise<string | null> {
     console.warn("[adversarial-review] Failed to run — not blocking on it.", err);
     return null;
   }
+}
+
+function attachSdkUsage(result: {
+  total_cost_usd?: number;
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+  modelUsage?: Record<string, { inputTokens: number; outputTokens: number; costUSD: number }>;
+  num_turns?: number;
+}): void {
+  try {
+    const runTree = getCurrentRunTree();
+    const usage = result.usage;
+    if (usage) {
+      const inputTokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+      const outputTokens = usage.output_tokens ?? 0;
+      (runTree as any).prompt_tokens = inputTokens;
+      (runTree as any).completion_tokens = outputTokens;
+      (runTree as any).total_tokens = inputTokens + outputTokens;
+      runTree.outputs = { total_cost_usd: result.total_cost_usd, num_turns: result.num_turns, model_breakdown: result.modelUsage };
+      const modelNames = Object.keys(result.modelUsage ?? {});
+      if (modelNames.length > 0) {
+        runTree.extra = {
+          ...runTree.extra,
+          metadata: { ...(runTree.extra?.metadata as Record<string, unknown> ?? {}), ls_model_name: modelNames[0], ls_provider: "anthropic", sdk_total_cost_usd: result.total_cost_usd },
+        };
+      }
+    }
+  } catch { /* best effort */ }
 }

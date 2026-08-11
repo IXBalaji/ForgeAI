@@ -24,7 +24,17 @@ export interface ReviewerVerdict {
   scopeGuardFlagged: boolean;
 }
 
-export const runReviewerAgent = traceable(_runReviewerAgent, { name: "reviewer-agent", run_type: "chain" });
+export interface BranchReviewVerdict {
+  verdict: "approved" | "rejected";
+  scopeGuardFlagged: boolean;
+  comments: string;
+}
+
+export const runReviewerAgent = traceable(_runReviewerAgent, {
+  name: "reviewer-agent",
+  run_type: "chain",
+  metadata: { model: "orchestrator" },
+});
 
 async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict> {
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
@@ -216,4 +226,52 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   }
 
   return { reviewResultId: reviewResult.id, verdict, scopeGuardFlagged: guard.flagged };
+}
+
+/**
+ * Review all changes on a shared branch at once. The worktree already exists
+ * and contains all ticket fixes as separate commits. Runs scope guard, build/
+ * lint/test gate, and adversarial review on the full diff.
+ */
+export const reviewBranch = traceable(_reviewBranch, {
+  name: "branch-reviewer",
+  run_type: "chain",
+  metadata: { model: "orchestrator" },
+});
+
+async function _reviewBranch(
+  worktreeDir: string,
+  ticketIds: string[],
+): Promise<BranchReviewVerdict> {
+  const { stdout: nameOnly } = await run("git", ["diff", "--name-only", `origin/${QA_BRANCH}`], worktreeDir);
+  const touchedFiles = nameOnly.trim().split("\n").filter(Boolean);
+
+  console.log(`[reviewer] Branch review — ${touchedFiles.length} changed file(s) across ${ticketIds.length} ticket(s)`);
+
+  if (touchedFiles.length === 0) {
+    console.warn("[reviewer] No files changed on branch — nothing to review.");
+    return { verdict: "rejected", scopeGuardFlagged: false, comments: "No files changed on the branch." };
+  }
+
+  const guard = await scopeGuard(worktreeDir);
+  const tests = await testGate(worktreeDir, touchedFiles);
+  console.log(`[reviewer] Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`);
+
+  const llmConcern = await adversarialReview(worktreeDir);
+
+  const verdict: "approved" | "rejected" = tests.passed ? "approved" : "rejected";
+
+  if (llmConcern) {
+    console.warn("[reviewer] Adversarial review concern (advisory, not blocking):", llmConcern.slice(0, 300));
+  }
+
+  const comments = [
+    `Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`,
+    guard.flagged ? `Scope guard: FLAGGED — ${guard.reason}` : "Scope guard: clear",
+    llmConcern ? `Adversarial review (advisory): ${llmConcern.slice(0, 500)}` : "Adversarial review: LGTM",
+    `Tickets reviewed: ${ticketIds.length}`,
+    `Files changed: ${touchedFiles.length}`,
+  ].join("\n");
+
+  return { verdict, scopeGuardFlagged: guard.flagged, comments };
 }

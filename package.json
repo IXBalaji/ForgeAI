@@ -21,6 +21,7 @@
     "fix:all": "tsx src/cli/index.ts fix:all",
     "review:deploy": "tsx src/cli/index.ts review:deploy",
     "pipeline": "tsx src/cli/index.ts orchestrate",
+    "cost-report": "tsx src/cli/index.ts cost-report",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",

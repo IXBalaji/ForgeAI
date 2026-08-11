@@ -1,9 +1,9 @@
 import "dotenv/config";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { fixAttempts, tickets, deployments, reviewResults } from "../db/schema.js";
-import { mergeBranch, createTag } from "../integrations/github.js";
+import { mergeBranch, createTag, updateBranchFromBase } from "../integrations/github.js";
 import { transitionTicket } from "../integrations/jira.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
 import { resolveConflicts } from "./conflict-resolver.js";
@@ -16,12 +16,23 @@ export interface DeployResult {
   tag: string | null;
 }
 
+export interface BranchDeployResult {
+  deploymentId: string | null;
+  commitSha: string | null;
+  tag: string | null;
+  ticketsDeployed: number;
+}
+
 /**
  * Merges an approved fix into the qa integration branch and tags it for
  * rollback — per architecture doc §06: "redeploy the last-good tag" instead
  * of a git-archaeology exercise.
  */
-export const runDeployAgent = traceable(_runDeployAgent, { name: "deploy-agent", run_type: "chain" });
+export const runDeployAgent = traceable(_runDeployAgent, {
+  name: "deploy-agent",
+  run_type: "chain",
+  metadata: { model: "orchestrator" },
+});
 
 async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
@@ -122,4 +133,88 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   }
 
   return { deploymentId: deployment.id, commitSha, tag };
+}
+
+/**
+ * Merge a shared branch containing fixes for multiple tickets into QA.
+ * All tickets are marked "done" on success.
+ */
+export const deployBranch = traceable(_deployBranch, {
+  name: "branch-deploy",
+  run_type: "chain",
+  metadata: { model: "orchestrator" },
+});
+
+async function _deployBranch(
+  branch: string,
+  ticketIds: string[],
+): Promise<BranchDeployResult> {
+  const allTickets = await db.select().from(tickets).where(
+    inArray(tickets.id, ticketIds),
+  );
+  const jiraKeys = allTickets.map((t) => t.jiraKey).filter(Boolean);
+  const jiraRef = jiraKeys.length > 0 ? ` [${jiraKeys.join(", ")}]` : "";
+
+  let commitSha: string | null = null;
+  try {
+    commitSha = await mergeBranch(
+      branch,
+      QA_BRANCH,
+      `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${branch} into ${QA_BRANCH} (${ticketIds.length} ticket(s))`,
+    );
+  } catch (err) {
+    const errMsg = (err as Error).message;
+    const isConflict = /409|conflict|merge/i.test(errMsg);
+
+    if (isConflict) {
+      console.warn(`[deploy] Merge conflict for ${branch} — updating branch from ${QA_BRANCH} and retrying...`);
+      try {
+        await updateBranchFromBase(branch, QA_BRANCH);
+        commitSha = await mergeBranch(
+          branch,
+          QA_BRANCH,
+          `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${branch} into ${QA_BRANCH} (conflicts resolved)`,
+        );
+      } catch (resolveErr) {
+        console.error(`[deploy] Conflict resolution failed: ${(resolveErr as Error).message}`);
+      }
+    }
+
+    if (!commitSha) {
+      console.error(`[deploy] Merge failed for ${branch}: ${errMsg}`);
+      for (const t of allTickets) {
+        if (t.jiraKey) await transitionTicket(t.jiraKey, "To Do");
+        await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, t.id));
+      }
+      const [deployment] = await db
+        .insert(deployments)
+        .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
+        .returning();
+      return { deploymentId: deployment.id, commitSha: null, tag: null, ticketsDeployed: 0 };
+    }
+  }
+
+  let tag: string | null = null;
+  if (commitSha) {
+    tag = `${LABEL_PREFIX_SLUG}-${QA_BRANCH}-${commitSha.slice(0, 7)}`;
+    await createTag(tag, commitSha);
+  }
+
+  const [deployment] = await db
+    .insert(deployments)
+    .values({
+      env: QA_BRANCH,
+      commitSha: commitSha ?? "unknown",
+      tag,
+      status: commitSha ? "succeeded" : "failed",
+    })
+    .returning();
+
+  for (const t of allTickets) {
+    await db.update(tickets).set({ status: "done" }).where(eq(tickets.id, t.id));
+    if (t.jiraKey) await transitionTicket(t.jiraKey, "Done");
+  }
+
+  console.log(`[deploy] Merged ${branch} — ${allTickets.length} ticket(s) deployed.`);
+  return { deploymentId: deployment.id, commitSha, tag, ticketsDeployed: allTickets.length };
 }

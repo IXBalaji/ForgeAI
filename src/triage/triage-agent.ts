@@ -17,7 +17,11 @@ export interface TriageResult {
  * per category (not one per issue instance), and merges into an existing open
  * ticket for that category if one is already in flight.
  */
-export const runTriageAgent = traceable(_runTriageAgent, { name: "triage-agent", run_type: "chain" });
+export const runTriageAgent = traceable(_runTriageAgent, {
+  name: "triage-agent",
+  run_type: "chain",
+  metadata: { model: "orchestrator" },
+});
 
 async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promise<TriageResult> {
   const openIssues = await db.select().from(issues).where(

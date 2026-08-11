@@ -2,7 +2,7 @@ import "dotenv/config";
 import { join, resolve } from "node:path";
 import { rm } from "node:fs/promises";
 import { eq, inArray } from "drizzle-orm";
-import { traceable } from "langsmith/traceable";
+import { traceable, getCurrentRunTree } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { tickets, fixAttempts, issues } from "../db/schema.js";
 import { run } from "../lib/exec.js";
@@ -23,6 +23,12 @@ export interface DeveloperResult {
   fixAttemptId: string | null;
   branch: string;
   prUrl: string | null;
+}
+
+export interface BatchFixResult {
+  ticketId: string;
+  commitSha: string | null;
+  jiraKey: string | null;
 }
 
 async function ensureWorktree(branch: string, worktreeDir: string): Promise<void> {
@@ -49,7 +55,11 @@ async function ensureWorktree(branch: string, worktreeDir: string): Promise<void
 // full prompt/response — the Claude Agent SDK isn't LangChain-native, so
 // LangSmith's automatic LangGraph tracing has no visibility into this call
 // on its own.
-const runAgentWithRetry = traceable(_runAgentWithRetry, { name: "developer-agent-sdk-call", run_type: "llm" });
+const runAgentWithRetry = traceable(_runAgentWithRetry, {
+  name: "developer-agent-sdk-call",
+  run_type: "llm",
+  metadata: { model: DEVELOPER_MODEL, ls_model_name: DEVELOPER_MODEL, ls_provider: "anthropic" },
+});
 
 async function _runAgentWithRetry(prompt: string, worktreeDir: string): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
@@ -77,6 +87,9 @@ async function _runAgentWithRetry(prompt: string, worktreeDir: string): Promise<
         if ((message as any).type === "assistant") {
           console.log("[developer]", JSON.stringify((message as any).message?.content ?? message));
         }
+        if ((message as any).type === "result") {
+          attachSdkUsageToRun(message as any);
+        }
       }
       return;
     } catch (err) {
@@ -91,7 +104,64 @@ async function _runAgentWithRetry(prompt: string, worktreeDir: string): Promise<
   console.warn(`[developer] Agent call failed after ${MAX_RETRIES + 1} attempts: ${lastErr?.message}`);
 }
 
-export const runDeveloperAgent = traceable(_runDeveloperAgent, { name: "developer-agent", run_type: "chain" });
+function attachSdkUsageToRun(result: {
+  total_cost_usd?: number;
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
+  modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number; costUSD: number }>;
+  num_turns?: number;
+  duration_ms?: number;
+}): void {
+  try {
+    const runTree = getCurrentRunTree();
+    const usage = result.usage;
+    if (usage) {
+      runTree.inputs = { ...runTree.inputs, prompt_summary: "(SDK agent session)" };
+      runTree.outputs = {
+        total_cost_usd: result.total_cost_usd,
+        num_turns: result.num_turns,
+        duration_ms: result.duration_ms,
+        model_breakdown: result.modelUsage,
+      };
+
+      const inputTokens = (usage.input_tokens ?? 0) + (usage.cache_read_input_tokens ?? 0) + (usage.cache_creation_input_tokens ?? 0);
+      const outputTokens = usage.output_tokens ?? 0;
+
+      (runTree as any).prompt_tokens = inputTokens;
+      (runTree as any).completion_tokens = outputTokens;
+      (runTree as any).total_tokens = inputTokens + outputTokens;
+
+      const modelNames = Object.keys(result.modelUsage ?? {});
+      if (modelNames.length > 0) {
+        runTree.extra = {
+          ...runTree.extra,
+          metadata: {
+            ...(runTree.extra?.metadata as Record<string, unknown> ?? {}),
+            ls_model_name: modelNames[0],
+            ls_provider: "anthropic",
+            model: modelNames[0],
+            sdk_total_cost_usd: result.total_cost_usd,
+            sdk_model_usage: result.modelUsage,
+          },
+        };
+      }
+    }
+    console.log(`[developer] LangSmith usage attached: ${JSON.stringify({
+      input_tokens: usage?.input_tokens,
+      output_tokens: usage?.output_tokens,
+      cache_read: usage?.cache_read_input_tokens,
+      total_cost_usd: result.total_cost_usd,
+      models: Object.keys(result.modelUsage ?? {}),
+    })}`);
+  } catch (err) {
+    console.warn(`[developer] Could not attach SDK usage to LangSmith run: ${(err as Error).message}`);
+  }
+}
+
+export const runDeveloperAgent = traceable(_runDeveloperAgent, {
+  name: "developer-agent",
+  run_type: "chain",
+  metadata: { model: DEVELOPER_MODEL },
+});
 
 async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   if (!TARGET_REPO_PATH) throw new Error("TARGET_REPO_PATH is not set.");
@@ -290,4 +360,133 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   }
 
   return { fixAttemptId, branch, prUrl };
+}
+
+/**
+ * Fix a single ticket on an existing shared branch/worktree. Commits with the
+ * Jira key in the message but does NOT push — the orchestrator pushes once
+ * after all tickets are fixed.
+ */
+export const fixTicketOnBranch = traceable(_fixTicketOnBranch, {
+  name: "developer-fix-on-branch",
+  run_type: "chain",
+  metadata: { model: DEVELOPER_MODEL },
+});
+
+async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promise<BatchFixResult> {
+  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+  if (ticket?.jiraKey) {
+    await transitionTicket(ticket.jiraKey, "In Progress");
+  }
+
+  const rawIssueIds = (ticket?.issueIds as string[]) ?? [];
+  const ticketIssues = rawIssueIds.length > 0
+    ? await db.select().from(issues).where(inArray(issues.id, rawIssueIds))
+    : [];
+
+  if (ticketIssues.length === 0) {
+    console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping.`);
+    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+    await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+    return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
+  }
+
+  const prompt = await buildPrompt(ticketId);
+  const jiraRef = ticket?.jiraKey ?? ticketId.slice(0, 8);
+  console.log(`[developer] ── SDK agent starting for ${jiraRef} ──`);
+  const sdkStart = Date.now();
+  await runAgentWithRetry(prompt, worktreeDir);
+  const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
+  console.log(`[developer] ── SDK agent finished for ${jiraRef} (${sdkDuration}s) ──`);
+
+  // Remove Windows reserved device names
+  try {
+    const { stdout: lsOut } = await run(
+      "git", ["ls-files", "--others", "--exclude-standard"], worktreeDir,
+    );
+    const reserved = /^(nul|con|prn|aux|com[0-9]|lpt[0-9])(\..+)?$/i;
+    for (const f of lsOut.split("\n").map((l) => l.trim()).filter(Boolean)) {
+      if (reserved.test(f.split("/").pop()!)) {
+        console.warn(`[developer] Removing Windows-reserved file: ${f}`);
+        await run("git", ["rm", "-f", "--", f], worktreeDir).catch(() =>
+          rm(resolve(worktreeDir, f), { force: true }).catch(() => {}),
+        );
+      }
+    }
+  } catch { /* best-effort */ }
+
+  await run("git", ["add", "-A"], worktreeDir);
+  const { stdout: statusOut } = await run("git", ["status", "--porcelain"], worktreeDir);
+
+  if (statusOut.trim().length === 0) {
+    console.warn(`[developer] No file changes for ${jiraRef} — SDK agent did not modify any files.`);
+    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+    await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+    return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
+  }
+
+  const changedFiles = statusOut.trim().split("\n");
+  console.log(`[developer] Changes for ${jiraRef} (${changedFiles.length} file(s)):`);
+  for (const line of changedFiles) console.log(`[developer]   ${line}`);
+
+  const commitMsg = `fix(${LABEL_PREFIX_SLUG}): [${ticket?.jiraKey ?? ticketId.slice(0, 8)}] ${ticket?.category ?? "accessibility fix"}`;
+  await run("git", ["commit", "-m", commitMsg], worktreeDir);
+  const { stdout: shaOut } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
+  const commitSha = shaOut.trim();
+  console.log(`[developer] Committed ${commitSha} for ${jiraRef}`);
+
+  await db.update(tickets).set({ status: "in_review" }).where(eq(tickets.id, ticketId));
+
+  return { ticketId, commitSha, jiraKey: ticket?.jiraKey ?? null };
+}
+
+/**
+ * Fix build/lint errors on an existing worktree. Called when the reviewer
+ * rejects a batch due to build failures. The agent sees the exact error
+ * output and fixes it in place, then commits.
+ */
+export const fixBuildErrors = traceable(_fixBuildErrors, {
+  name: "developer-fix-build-errors",
+  run_type: "chain",
+  metadata: { model: DEVELOPER_MODEL },
+});
+
+async function _fixBuildErrors(worktreeDir: string, reviewComments: string): Promise<string | null> {
+  const prompt = [
+    `The reviewer rejected the branch because the build/lint/test failed.`,
+    `You MUST fix these errors. The worktree already contains the code changes.`,
+    ``,
+    `CRITICAL: You are working inside a git worktree. ALL file reads and edits MUST stay within your current working directory.`,
+    ``,
+    `Reviewer output:`,
+    reviewComments,
+    ``,
+    `STEPS:`,
+    `1. Read the error output carefully — it tells you exactly which file and line has the problem.`,
+    `2. Fix each error. Common issues: unused imports (remove them), type errors, syntax errors.`,
+    `3. Run the build command (e.g. "npm run build" or "npx tsc --noEmit") to verify the fix.`,
+    `4. If there are still errors, fix them and rebuild until the build passes.`,
+    `5. Do NOT introduce new features or change functionality — only fix the errors.`,
+  ].join("\n");
+
+  console.log(`[developer] ── Autofix starting for build errors ──`);
+  const sdkStart = Date.now();
+  await runAgentWithRetry(prompt, worktreeDir);
+  const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
+  console.log(`[developer] ── Autofix finished (${sdkDuration}s) ──`);
+
+  await run("git", ["add", "-A"], worktreeDir);
+  const { stdout: statusOut } = await run("git", ["status", "--porcelain"], worktreeDir);
+
+  if (statusOut.trim().length === 0) {
+    console.warn(`[developer] Autofix made no changes.`);
+    return null;
+  }
+
+  const commitMsg = `fix(${LABEL_PREFIX_SLUG}): fix build errors from review feedback`;
+  await run("git", ["commit", "-m", commitMsg], worktreeDir);
+  const { stdout: shaOut } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
+  const commitSha = shaOut.trim();
+  console.log(`[developer] Autofix committed: ${commitSha}`);
+  return commitSha;
 }

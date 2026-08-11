@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { traceable, getCurrentRunTree } from "langsmith/traceable";
 import { CLASSIFIER_MODEL } from "../lib/config.js";
 import type { AggregatedIssue } from "./report-reader.js";
 
@@ -53,7 +54,13 @@ Affected elements by page:
 ${pages}`;
 }
 
-export async function classifyIssues(issues: AggregatedIssue[]): Promise<ClassifiedIssue[]> {
+export const classifyIssues = traceable(_classifyIssues, {
+  name: "issue-classifier",
+  run_type: "llm",
+  metadata: { model: CLASSIFIER_MODEL },
+});
+
+async function _classifyIssues(issues: AggregatedIssue[]): Promise<ClassifiedIssue[]> {
   const client = new Anthropic();
   const classified: ClassifiedIssue[] = [];
 
@@ -74,6 +81,25 @@ export async function classifyIssues(issues: AggregatedIssue[]): Promise<Classif
         },
       ],
     });
+
+    try {
+      const runTree = getCurrentRunTree();
+      runTree.extra = {
+        ...runTree.extra,
+        metadata: {
+          ...(runTree.extra?.metadata as Record<string, unknown> ?? {}),
+          ls_model_name: CLASSIFIER_MODEL,
+          ls_provider: "anthropic",
+        },
+      };
+      runTree.inputs = { issue_count: issues.length, model: CLASSIFIER_MODEL };
+      runTree.outputs = {
+        input_tokens: response.usage.input_tokens,
+        output_tokens: response.usage.output_tokens,
+      };
+    } catch {
+      // tracing unavailable
+    }
 
     const raw = response.content[0].type === "text" ? response.content[0].text : "";
     const text = raw.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "").trim();
