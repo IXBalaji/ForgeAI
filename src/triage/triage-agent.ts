@@ -2,9 +2,11 @@ import { eq, and, inArray } from "drizzle-orm";
 import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { issues, tickets } from "../db/schema.js";
-import { createTriagedTicket, updateJiraTicket, transitionTicket } from "../integrations/jira.js";
+import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { LABEL_PREFIX } from "../lib/config.js";
 import { categorize } from "./categorize.js";
+
+const tracker = getTrackerProvider();
 
 export interface TriageResult {
   ticketsCreated: number;
@@ -24,128 +26,49 @@ function computeHighestSeverity(severityCounts: Record<string, number>): string 
   return SEVERITY_ORDER.find((s) => severityCounts[s]) ?? "moderate";
 }
 
-function buildTicketAdf(params: {
+function buildTicketMarkdown(params: {
   category: string;
   categoryIssues: Array<{ id: string; wcagRule: string; selector: string; pageUrl: string; severity: string }>;
   severityCounts: Record<string, number>;
   highestSeverity: string;
-}): any[] {
+}): string {
   const { category, categoryIssues, severityCounts, highestSeverity } = params;
   const affectedPages = [...new Set(categoryIssues.map((i) => i.pageUrl))];
   const wcagRules = [...new Set(categoryIssues.map((i) => i.wcagRule))];
   const selectors = categoryIssues.slice(0, 10).map((i) => i.selector);
   const priorityMap: Record<string, string> = { critical: "P1", serious: "P2", moderate: "P3", minor: "P4" };
 
-  const content: any[] = [
-    {
-      type: "panel", attrs: { panelType: "info" },
-      content: [{
-        type: "paragraph",
-        content: [
-          { type: "text", text: "Priority: ", marks: [{ type: "strong" }] },
-          { type: "text", text: priorityMap[highestSeverity] ?? "P3" },
-          { type: "text", text: " | " },
-          { type: "text", text: "Impact: ", marks: [{ type: "strong" }] },
-          { type: "text", text: highestSeverity },
-          { type: "text", text: " | " },
-          { type: "text", text: "Instances: ", marks: [{ type: "strong" }] },
-          { type: "text", text: String(categoryIssues.length) },
-          { type: "text", text: " | " },
-          { type: "text", text: "Pages: ", marks: [{ type: "strong" }] },
-          { type: "text", text: String(affectedPages.length) },
-        ],
-      }],
-    },
-    {
-      type: "heading", attrs: { level: 2 },
-      content: [{ type: "text", text: "Summary" }],
-    },
-    {
-      type: "paragraph",
-      content: [
-        { type: "text", text: `${categoryIssues.length} instance(s) of ` },
-        { type: "text", text: category, marks: [{ type: "strong" }] },
-        { type: "text", text: ` found across ${affectedPages.length} page(s).` },
-      ],
-    },
-    {
-      type: "heading", attrs: { level: 2 },
-      content: [{ type: "text", text: "Severity Breakdown" }],
-    },
-    {
-      type: "table",
-      content: [
-        {
-          type: "tableRow",
-          content: [
-            { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Severity" }] }] },
-            { type: "tableHeader", content: [{ type: "paragraph", content: [{ type: "text", text: "Count" }] }] },
-          ],
-        },
-        ...Object.entries(severityCounts).map(([sev, count]) => ({
-          type: "tableRow",
-          content: [
-            { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: sev }] }] },
-            { type: "tableCell", content: [{ type: "paragraph", content: [{ type: "text", text: String(count) }] }] },
-          ],
-        })),
-      ],
-    },
-    {
-      type: "heading", attrs: { level: 2 },
-      content: [{ type: "text", text: "WCAG Rules" }],
-    },
-    {
-      type: "paragraph",
-      content: [{ type: "text", text: wcagRules.join(", ") || "best-practice" }],
-    },
-    {
-      type: "heading", attrs: { level: 2 },
-      content: [{ type: "text", text: "Affected Pages" }],
-    },
-    {
-      type: "bulletList",
-      content: affectedPages.slice(0, 20).map((url) => ({
-        type: "listItem",
-        content: [{ type: "paragraph", content: [{ type: "text", text: url }] }],
-      })),
-    },
+  const lines: string[] = [
+    `> Priority: **${priorityMap[highestSeverity] ?? "P3"}** | Impact: **${highestSeverity}** | Instances: **${categoryIssues.length}** | Pages: **${affectedPages.length}**`,
+    "## Summary",
+    `${categoryIssues.length} instance(s) of **${category}** found across ${affectedPages.length} page(s).`,
+    "## Severity Breakdown",
+    "| Severity | Count |",
+    "| --- | --- |",
+    ...Object.entries(severityCounts).map(([sev, count]) => `| ${sev} | ${count} |`),
+    "## WCAG Rules",
+    wcagRules.join(", ") || "best-practice",
+    "## Affected Pages",
+    ...affectedPages.slice(0, 20).map((url) => `- ${url}`),
   ];
 
   if (affectedPages.length > 20) {
-    content.push({
-      type: "paragraph",
-      content: [{ type: "text", text: `…and ${affectedPages.length - 20} more page(s).`, marks: [{ type: "em" }] }],
-    });
+    lines.push(`*…and ${affectedPages.length - 20} more page(s).*`);
   }
 
-  content.push(
-    {
-      type: "heading", attrs: { level: 2 },
-      content: [{ type: "text", text: "Affected Elements" }],
-    },
-    {
-      type: "codeBlock", attrs: { language: "css" },
-      content: [{ type: "text", text: selectors.join("\n") }],
-    },
-  );
+  lines.push("## Affected Elements");
+  lines.push("```css");
+  lines.push(selectors.join("\n"));
+  lines.push("```");
 
   if (categoryIssues.length > 10) {
-    content.push({
-      type: "paragraph",
-      content: [{ type: "text", text: `…and ${categoryIssues.length - 10} more selector(s).`, marks: [{ type: "em" }] }],
-    });
+    lines.push(`*…and ${categoryIssues.length - 10} more selector(s).*`);
   }
 
-  content.push({ type: "rule" });
-  content.push({
-    type: "paragraph",
-    content: [
-      { type: "text", text: `Last updated: ${new Date().toISOString()}`, marks: [{ type: "em" }] },
-    ],
-  });
+  lines.push("---");
+  lines.push(`*Last updated: ${new Date().toISOString()}*`);
 
-  return content;
+  return lines.join("\n");
 }
 
 async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promise<TriageResult> {
@@ -176,7 +99,7 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
       if (doneTicket) {
         await db.update(tickets).set({ status: "open", issueIds: [], epicKey }).where(eq(tickets.id, doneTicket.id));
         if (doneTicket.jiraKey) {
-          await transitionTicket(doneTicket.jiraKey, "To Do");
+          await tracker.transitionTicket(doneTicket.jiraKey, "To Do");
         }
         console.log(`[triage] Reopened previously-done ticket ${doneTicket.jiraKey ?? doneTicket.id} for category "${category}" — violation resurfaced`);
         existing = { ...doneTicket, status: "open", issueIds: [], epicKey };
@@ -191,7 +114,7 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
     const priorityMap: Record<string, string> = { critical: "P1", serious: "P2", moderate: "P3", minor: "P4" };
     const wcagRules = [...new Set(categoryIssues.map((i) => i.wcagRule))];
 
-    const adfContent = buildTicketAdf({ category, categoryIssues, severityCounts, highestSeverity });
+    const descriptionMarkdown = buildTicketMarkdown({ category, categoryIssues, severityCounts, highestSeverity });
 
     if (existing) {
       const mergedIssueIds = Array.from(new Set([...(existing.issueIds as string[]), ...newIssueIds]));
@@ -199,12 +122,12 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
 
       if (existing.jiraKey) {
         try {
-          await updateJiraTicket({
-            jiraKey: existing.jiraKey,
+          await tracker.updateTicket({
+            key: existing.jiraKey,
             summary: `[${LABEL_PREFIX}] ${category}`,
-            description: { type: "doc", version: 1, content: adfContent },
+            description: descriptionMarkdown,
             labels: [LABEL_PREFIX, ...wcagRules.map((r) => `a11y:${r}`)],
-            priority: priorityMap[highestSeverity],
+            priority: priorityMap[highestSeverity] as "P1" | "P2" | "P3" | "P4" | undefined,
           });
           console.log(`[triage] Updated Jira ticket ${existing.jiraKey} for category "${category}" with ${mergedIssueIds.length} issue(s)`);
         } catch (err) {
@@ -215,12 +138,12 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
     } else {
       let jiraKey: string | null = null;
       try {
-        jiraKey = await createTriagedTicket({
+        jiraKey = await tracker.createTicket({
           epicKey,
           summary: `[${LABEL_PREFIX}] ${category}`,
-          description: { type: "doc", version: 1, content: adfContent },
+          description: descriptionMarkdown,
           labels: [LABEL_PREFIX, ...wcagRules.map((r) => `a11y:${r}`)],
-          priority: priorityMap[highestSeverity],
+          priority: priorityMap[highestSeverity] as "P1" | "P2" | "P3" | "P4" | undefined,
         });
       } catch (err) {
         console.warn(`[triage] Failed to create Jira ticket for "${category}" — continuing locally:`, (err as Error).message);

@@ -3,8 +3,10 @@ import crypto from "node:crypto";
 import { readReportDir, aggregateByRule } from "./report-reader.js";
 import { classifyIssues } from "./issue-classifier.js";
 import { buildTicketPayloads, type JiraTicketPayload } from "./ticket-builder.js";
-import { ensureEpic, createTriagedTicket, findExistingJiraTicket, updateJiraTicket, transitionTicket } from "../integrations/jira.js";
+import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { LABEL_PREFIX } from "../lib/config.js";
+
+const tracker = getTrackerProvider();
 import { and, eq, inArray } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { scanRuns, issues, tickets as ticketsTable } from "../db/schema.js";
@@ -66,7 +68,7 @@ export async function triageFromReports(opts: {
 
   let epicKey: string | null = null;
   if (opts.cycleId && !opts.dryRun) {
-    epicKey = await ensureEpic(opts.cycleId);
+    epicKey = await tracker.ensureEpic(opts.cycleId);
   }
 
   let syntheticScanRunId: string | null = null;
@@ -109,7 +111,7 @@ export async function triageFromReports(opts: {
         if (doneTicket) {
           await db.update(ticketsTable).set({ status: "open", issueIds: [], epicKey }).where(eq(ticketsTable.id, doneTicket.id));
           if (doneTicket.jiraKey) {
-            await transitionTicket(doneTicket.jiraKey, "To Do");
+            await tracker.transitionTicket(doneTicket.jiraKey, "To Do");
           }
           console.log(`[triage] Reopened previously-done ticket ${doneTicket.jiraKey ?? doneTicket.id} for category "${category}" — violation resurfaced`);
           existingForJira = { ...doneTicket, status: "open", issueIds: [], epicKey };
@@ -119,19 +121,19 @@ export async function triageFromReports(opts: {
       if (existingForJira?.jiraKey) {
         jiraKey = existingForJira.jiraKey;
         try {
-          await updateJiraTicket({
-            jiraKey,
+          await tracker.updateTicket({
+            key: jiraKey,
             summary: payload.summary,
             description: payload.description,
             labels: payload.labels,
-            priority: payload.priority,
+            priority: payload.priority as "P1" | "P2" | "P3" | "P4" | undefined,
           });
           console.log(`[triage] Updated existing Jira ticket ${jiraKey} for category "${category}" with fresh scan data`);
         } catch (err) {
           console.warn(`[triage] Failed to update ${jiraKey}: ${(err as Error).message}`);
         }
       } else {
-        const existingJiraKey = await findExistingJiraTicket({
+        const existingJiraKey = await tracker.findExisting({
           summaryPrefix: `[${LABEL_PREFIX}] ${category}`,
           labels: payload.labels,
         });
@@ -139,12 +141,12 @@ export async function triageFromReports(opts: {
         if (existingJiraKey) {
           jiraKey = existingJiraKey;
           try {
-            await updateJiraTicket({
-              jiraKey,
+            await tracker.updateTicket({
+              key: jiraKey,
               summary: payload.summary,
               description: payload.description,
               labels: payload.labels,
-              priority: payload.priority,
+              priority: payload.priority as "P1" | "P2" | "P3" | "P4" | undefined,
             });
             console.log(`[triage] Found and updated existing Jira ticket ${jiraKey} for category "${category}"`);
           } catch (err) {
@@ -152,12 +154,12 @@ export async function triageFromReports(opts: {
           }
         } else {
           try {
-            jiraKey = await createTriagedTicket({
+            jiraKey = await tracker.createTicket({
               epicKey,
               summary: payload.summary,
               description: payload.description,
               labels: payload.labels,
-              priority: payload.priority,
+              priority: payload.priority as "P1" | "P2" | "P3" | "P4" | undefined,
             });
             if (jiraKey) {
               console.log(`[triage] Created ${jiraKey}: ${payload.summary}`);
