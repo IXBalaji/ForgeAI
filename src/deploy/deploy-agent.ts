@@ -3,12 +3,15 @@ import { eq, inArray } from "drizzle-orm";
 import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { fixAttempts, tickets, deployments, reviewResults } from "../db/schema.js";
-import { mergeBranch, createTag, updateBranchFromBase } from "../integrations/github.js";
-import { transitionTicket, commentOnTicket } from "../integrations/jira.js";
+import { getVcsProvider } from "../integrations/vcs/factory.js";
+import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
 import { resolveConflicts } from "./conflict-resolver.js";
 
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
+
+const vcs = getVcsProvider();
+const tracker = getTrackerProvider();
 
 async function postResolutionComment(
   jiraKey: string,
@@ -44,7 +47,7 @@ async function postResolutionComment(
     reviewComments.length > 0 ? `\nReview notes:\n${reviewComments.join("\n")}` : null,
   ];
 
-  await commentOnTicket(jiraKey, lines.filter(Boolean).join("\n"));
+  await tracker.comment(jiraKey, lines.filter(Boolean).join("\n"));
 }
 
 export interface DeployResult {
@@ -100,14 +103,14 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
 
   let commitSha: string | null = null;
   try {
-    commitSha = await mergeBranch(
+    commitSha = await vcs.mergeBranch(
       attempt.branch,
       QA_BRANCH,
       `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${attempt.branch} into ${QA_BRANCH}`,
     );
   } catch (err) {
     const errMsg = (err as Error).message;
-    const isConflict = /409|conflict|merge/i.test(errMsg);
+    const isConflict = vcs.isConflictError(err as Error);
 
     if (isConflict) {
       console.warn(`[deploy] Merge conflict detected for ${attempt.branch}${jiraRef} — invoking conflict resolver...`);
@@ -115,7 +118,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
         const resolution = await resolveConflicts(fixAttemptId);
         if (resolution.resolved) {
           console.log(`[deploy] Conflicts resolved for ${attempt.branch} — retrying merge...`);
-          commitSha = await mergeBranch(
+          commitSha = await vcs.mergeBranch(
             attempt.branch,
             QA_BRANCH,
             `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${attempt.branch} into ${QA_BRANCH} (conflicts resolved)`,
@@ -131,7 +134,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
     if (!commitSha) {
       console.error(`[deploy] GitHub merge failed for ${attempt.branch}: ${errMsg}`);
       if (ticket?.jiraKey) {
-        await transitionTicket(ticket.jiraKey, "To Do");
+        await tracker.transitionTicket(ticket.jiraKey, "To Do");
       }
       await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, attempt.ticketId));
       const [deployment] = await db
@@ -148,7 +151,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   let tag: string | null = null;
   if (commitSha) {
     tag = `${LABEL_PREFIX_SLUG}-${QA_BRANCH}-${commitSha.slice(0, 7)}`;
-    await createTag(tag, commitSha);
+    await vcs.createTag(tag, commitSha);
   }
 
   // Actual QA deploy is expected to be triggered by your existing CI/CD on push
@@ -172,7 +175,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
       tag,
       ticketId: attempt.ticketId,
     });
-    await transitionTicket(ticket.jiraKey, "Done");
+    await tracker.transitionTicket(ticket.jiraKey, "Done");
   }
 
   return { deploymentId: deployment.id, commitSha, tag };
@@ -200,20 +203,20 @@ async function _deployBranch(
 
   let commitSha: string | null = null;
   try {
-    commitSha = await mergeBranch(
+    commitSha = await vcs.mergeBranch(
       branch,
       QA_BRANCH,
       `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${branch} into ${QA_BRANCH} (${ticketIds.length} ticket(s))`,
     );
   } catch (err) {
     const errMsg = (err as Error).message;
-    const isConflict = /409|conflict|merge/i.test(errMsg);
+    const isConflict = vcs.isConflictError(err as Error);
 
     if (isConflict) {
       console.warn(`[deploy] Merge conflict for ${branch} — updating branch from ${QA_BRANCH} and retrying...`);
       try {
-        await updateBranchFromBase(branch, QA_BRANCH);
-        commitSha = await mergeBranch(
+        await vcs.updateBranchFromBase(branch, QA_BRANCH);
+        commitSha = await vcs.mergeBranch(
           branch,
           QA_BRANCH,
           `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${branch} into ${QA_BRANCH} (conflicts resolved)`,
@@ -226,7 +229,7 @@ async function _deployBranch(
     if (!commitSha) {
       console.error(`[deploy] Merge failed for ${branch}: ${errMsg}`);
       for (const t of allTickets) {
-        if (t.jiraKey) await transitionTicket(t.jiraKey, "To Do");
+        if (t.jiraKey) await tracker.transitionTicket(t.jiraKey, "To Do");
         await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, t.id));
       }
       const [deployment] = await db
@@ -240,7 +243,7 @@ async function _deployBranch(
   let tag: string | null = null;
   if (commitSha) {
     tag = `${LABEL_PREFIX_SLUG}-${QA_BRANCH}-${commitSha.slice(0, 7)}`;
-    await createTag(tag, commitSha);
+    await vcs.createTag(tag, commitSha);
   }
 
   const [deployment] = await db
@@ -262,7 +265,7 @@ async function _deployBranch(
         tag,
         ticketId: t.id,
       });
-      await transitionTicket(t.jiraKey, "Done");
+      await tracker.transitionTicket(t.jiraKey, "Done");
     }
   }
 
