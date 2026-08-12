@@ -8,11 +8,13 @@ import { runDeveloperAgent, fixTicketOnBranch, type DeveloperResult, type BatchF
 import { runReviewerAgent, reviewBranch, type ReviewerVerdict, type BranchReviewVerdict } from "../review/reviewer-agent.js";
 import { runDeployAgent, deployBranch, type DeployResult, type BranchDeployResult } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
-import { ensureEpic } from "../integrations/jira.js";
+import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { runOrchestratorCycle } from "../orchestrator/graph.js";
 import { initObservability, withSpan } from "../integrations/observability.js";
 import { db } from "../db/client.js";
 import { iterationCycles } from "../db/schema.js";
+
+const tracker = getTrackerProvider();
 
 const program = new Command();
 program.name("a11y-agents").description("Autonomous accessibility remediation agent system");
@@ -64,7 +66,7 @@ program
   .option("--cycle <id>", "iteration cycle id to file the epic under (creates a throwaway one if omitted)")
   .action(async (opts) => {
     const cycleId = opts.cycle ?? (await db.insert(iterationCycles).values({ cycleNumber: 0 }).returning())[0].id;
-    const epicKey = await ensureEpic(cycleId);
+    const epicKey = await tracker.ensureEpic(cycleId);
     const result = await withSpan("agent.triage", () => runTriageAgent(opts.scanRun, epicKey));
     console.log(JSON.stringify({ cycleId, ...result }, null, 2));
   });
