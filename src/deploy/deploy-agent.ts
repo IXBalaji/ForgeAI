@@ -68,7 +68,7 @@ export interface BranchDeployResult {
 export const runDeployAgent = traceable(_runDeployAgent, {
   name: "deploy.run",
   run_type: "chain",
-  metadata: { model: "orchestrator" },
+  metadata: { node_kind: "orchestration" },
 });
 
 async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
@@ -185,7 +185,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
 export const deployBranch = traceable(_deployBranch, {
   name: "deploy.merge_branch",
   run_type: "chain",
-  metadata: { model: "orchestrator" },
+  metadata: { node_kind: "orchestration" },
 });
 
 async function _deployBranch(

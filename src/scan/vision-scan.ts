@@ -6,7 +6,14 @@ export interface VisionScanOptions {
   storageState?: string | object;
 }
 
-const VISION_MODEL = process.env.CLAUDE_VISION_MODEL ?? "claude-opus-5";
+const VISION_MODEL = process.env.CLAUDE_VISION_MODEL ?? "claude-opus-4-6";
+
+const VISION_INSTRUCTIONS = [
+  "Look for accessibility problems a static rule engine like axe-core cannot detect from the DOM alone:",
+  "text with insufficient contrast baked into an image, a visual reading order that doesn't match a logical",
+  "top-to-bottom/left-to-right flow, or focus/interactive elements with no visible focus indicator style.",
+  "Only report issues you can actually see in this screenshot. If there are none, return an empty findings array.",
+].join(" ");
 
 const FINDINGS_SCHEMA = {
   type: "object",
@@ -65,16 +72,12 @@ export async function runVisionScan(baseUrl: string, routes: string[], options?:
           {
             role: "user",
             content: [
-              { type: "image", source: { type: "base64", media_type: "image/png", data: screenshot.toString("base64") } },
               {
                 type: "text",
-                text: [
-                  "Look for accessibility problems a static rule engine like axe-core cannot detect from the DOM alone:",
-                  "text with insufficient contrast baked into an image, a visual reading order that doesn't match a logical",
-                  "top-to-bottom/left-to-right flow, or focus/interactive elements with no visible focus indicator style.",
-                  "Only report issues you can actually see in this screenshot. If there are none, return an empty findings array.",
-                ].join(" "),
+                text: VISION_INSTRUCTIONS,
+                cache_control: { type: "ephemeral" },
               },
+              { type: "image", source: { type: "base64", media_type: "image/png", data: screenshot.toString("base64") } },
             ],
           },
         ],

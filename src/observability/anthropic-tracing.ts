@@ -104,6 +104,8 @@ export function extractSdkTokenUsage(result: SdkUsageResult, fallbackModel: stri
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
   input_cost: number;
   output_cost: number;
   total_cost: number;
@@ -111,10 +113,9 @@ export function extractSdkTokenUsage(result: SdkUsageResult, fallbackModel: stri
   const usage = result.usage;
   const modelNames = Object.keys(result.modelUsage ?? {});
   const model_name = modelNames[0] ?? fallbackModel;
-  const input_tokens =
-    (usage?.input_tokens ?? 0) +
-    (usage?.cache_read_input_tokens ?? 0) +
-    (usage?.cache_creation_input_tokens ?? 0);
+  const cache_read_tokens = usage?.cache_read_input_tokens ?? 0;
+  const cache_creation_tokens = usage?.cache_creation_input_tokens ?? 0;
+  const input_tokens = (usage?.input_tokens ?? 0) + cache_read_tokens + cache_creation_tokens;
   const output_tokens = usage?.output_tokens ?? 0;
   const total_tokens = input_tokens + output_tokens;
   const costs = splitSdkCosts(
@@ -124,7 +125,7 @@ export function extractSdkTokenUsage(result: SdkUsageResult, fallbackModel: stri
     result.total_cost_usd,
     result.modelUsage,
   );
-  return { model_name, input_tokens, output_tokens, total_tokens, ...costs };
+  return { model_name, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, ...costs };
 }
 
 function attachRunUsage(
@@ -134,6 +135,7 @@ function attachRunUsage(
   outputTokens: number,
   costs: { input_cost: number; output_cost: number; total_cost: number },
   status: "success" | "error",
+  cacheTokens?: { cache_read_tokens: number; cache_creation_tokens: number },
 ): void {
   const totalTokens = inputTokens + outputTokens;
   (runTree as RunTree & { prompt_tokens?: number }).prompt_tokens = inputTokens;
@@ -147,6 +149,9 @@ function attachRunUsage(
       input_tokens: inputTokens,
       output_tokens: outputTokens,
       total_tokens: totalTokens,
+      cache_read_input_tokens: cacheTokens?.cache_read_tokens ?? 0,
+      cache_creation_input_tokens: cacheTokens?.cache_creation_tokens ?? 0,
+      uncached_input_tokens: inputTokens - (cacheTokens?.cache_read_tokens ?? 0) - (cacheTokens?.cache_creation_tokens ?? 0),
       input_cost: costs.input_cost,
       output_cost: costs.output_cost,
       total_cost: costs.total_cost,
@@ -170,6 +175,7 @@ async function postAnthropicRun(
     outputTokens: number;
     costs: { input_cost: number; output_cost: number; total_cost: number };
     status: "success" | "error";
+    cacheTokens?: { cache_read_tokens: number; cache_creation_tokens: number };
   },
 ): Promise<void> {
   if (!runTree) return;
@@ -183,6 +189,8 @@ async function postAnthropicRun(
       input_tokens: params.inputTokens,
       output_tokens: params.outputTokens,
       total_tokens: params.inputTokens + params.outputTokens,
+      cache_read_input_tokens: params.cacheTokens?.cache_read_tokens ?? 0,
+      cache_creation_input_tokens: params.cacheTokens?.cache_creation_tokens ?? 0,
       input_cost: params.costs.input_cost,
       output_cost: params.costs.output_cost,
       total_cost: params.costs.total_cost,
@@ -196,6 +204,7 @@ async function postAnthropicRun(
       params.outputTokens,
       params.costs,
       params.status,
+      params.cacheTokens,
     );
     await runTree.end(runTree.outputs);
   }
@@ -264,7 +273,9 @@ export async function traceAnthropicMessagesCreate<T extends Anthropic.Message>(
   try {
     const client = new (await import("@anthropic-ai/sdk")).default();
     const response = await call(client);
-    const inputTokens = response.usage.input_tokens;
+    const cache_read_tokens = (response.usage as { cache_read_input_tokens?: number }).cache_read_input_tokens ?? 0;
+    const cache_creation_tokens = (response.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens ?? 0;
+    const inputTokens = response.usage.input_tokens + cache_read_tokens + cache_creation_tokens;
     const outputTokens = response.usage.output_tokens;
     const input_cost = calculateCost(options.model_name, inputTokens, 0);
     const output_cost = calculateCost(options.model_name, 0, outputTokens);
@@ -287,6 +298,7 @@ export async function traceAnthropicMessagesCreate<T extends Anthropic.Message>(
       outputTokens,
       costs,
       status: "success",
+      cacheTokens: { cache_read_tokens, cache_creation_tokens },
     });
     return response;
   } catch (err) {
@@ -383,6 +395,10 @@ export async function traceAnthropicAgentSdkQuery(opts: AgentSdkQueryOptions): P
             total_cost: usage.total_cost,
           },
           status: "success",
+          cacheTokens: {
+            cache_read_tokens: usage.cache_read_tokens,
+            cache_creation_tokens: usage.cache_creation_tokens,
+          },
         });
       } else {
         await postAnthropicRun(runTree, traceOptions, {

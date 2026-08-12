@@ -63,7 +63,20 @@ export async function classifyIssues(issues: AggregatedIssue[]): Promise<Classif
   let results: Array<{ issueType: IssueType; reason: string; priority: string; labels: string[] }>;
 
   try {
-    const userContent = `${CLASSIFICATION_PROMPT}\n\nClassify each of these ${issues.length} issues. Return a JSON array with one object per issue, in the same order.\n\n${batchContext}`;
+    // The classification rules are static across every call — mark them as an
+    // ephemeral cache breakpoint so repeated triage runs don't re-bill this
+    // stable prefix. Only the per-batch issue content varies.
+    const staticInstructions = `${CLASSIFICATION_PROMPT}\n\nClassify each of these issues. Return a JSON array with one object per issue, in the same order.\n\n`;
+    const dynamicContent = `Number of issues in this batch: ${issues.length}\n\n${batchContext}`;
+    const messages = [
+      {
+        role: "user" as const,
+        content: [
+          { type: "text" as const, text: staticInstructions, cache_control: { type: "ephemeral" as const } },
+          { type: "text" as const, text: dynamicContent },
+        ],
+      },
+    ];
     const response = await traceAnthropicMessagesCreate(
       {
         agent_name: "triage",
@@ -73,13 +86,13 @@ export async function classifyIssues(issues: AggregatedIssue[]): Promise<Classif
       {
         issue_count: issues.length,
         operation_name: "issue_classification",
-        messages: [{ role: "user", content: userContent }],
+        messages,
       },
       (client) =>
         client.messages.create({
           model: CLASSIFIER_MODEL,
           max_tokens: 2048,
-          messages: [{ role: "user", content: userContent }],
+          messages,
         }),
     );
 

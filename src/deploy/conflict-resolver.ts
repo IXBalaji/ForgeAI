@@ -8,14 +8,41 @@ import { db } from "../db/client.js";
 import { tickets, issues, fixAttempts } from "../db/schema.js";
 import { run } from "../lib/exec.js";
 import { gitRepoMutex } from "../lib/mutex.js";
-import { DEVELOPER_MODEL, DEVELOPER_EFFORT, LABEL_PREFIX_SLUG } from "../lib/config.js";
+import { DEVELOPER_MODEL, DEVELOPER_EFFORT, DEVELOPER_MAX_TURNS, LABEL_PREFIX_SLUG } from "../lib/config.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const GITHUB_OWNER = process.env.GITHUB_OWNER ?? "";
 const GITHUB_REPO = process.env.GITHUB_REPO ?? "";
-const MAX_RETRIES = parseInt(process.env.CONFLICT_RESOLVER_MAX_RETRIES ?? "2", 10);
+const MAX_RETRIES = parseInt(process.env.CONFLICT_RESOLVER_MAX_RETRIES ?? "1", 10);
+
+/**
+ * Static, session-independent instructions — byte-identical across every
+ * conflict resolution call, so it's a stable cacheable systemPrompt prefix
+ * instead of being re-billed as part of each dynamic prompt.
+ */
+function buildConflictSystemPrompt(qaBranch: string): string {
+  return [
+    `You are resolving merge conflicts between a fix branch and the ${qaBranch} integration branch.`,
+    ``,
+    `CRITICAL RULES:`,
+    `- You are working inside a git worktree. ALL file reads and edits MUST stay within your current working directory.`,
+    `- The merge has already been started — files contain conflict markers (<<<<<<< HEAD, =======, >>>>>>>).`,
+    `- Your job is to resolve ALL conflict markers while preserving BOTH:`,
+    `  1. The accessibility fix from the feature branch (this is the primary intent)`,
+    `  2. Any legitimate upstream changes from ${qaBranch} that don't contradict the fix`,
+    `- When in doubt, favor the accessibility fix — that is the purpose of this branch.`,
+    `- After resolving, there should be ZERO conflict markers (<<<<<<< or ======= or >>>>>>>) in any file.`,
+    `- Do NOT create new files or make changes beyond resolving the conflicts.`,
+    ``,
+    `STEPS:`,
+    `1. Read each conflicted file to see the full conflict markers in context.`,
+    `2. For each file, edit to resolve the conflicts — remove all <<<<<<< ======= >>>>>>> markers.`,
+    `3. Use Grep to verify NO conflict markers remain: grep for "<<<<<<< " across all files.`,
+    `4. Do NOT run git add or git commit — the caller handles that.`,
+  ].join("\n");
+}
 
 export interface ConflictResolveResult {
   resolved: boolean;
@@ -331,18 +358,6 @@ async function buildConflictPrompt(
   }
 
   return [
-    `You are resolving merge conflicts between a fix branch and the ${QA_BRANCH} integration branch.`,
-    ``,
-    `CRITICAL RULES:`,
-    `- You are working inside a git worktree. ALL file reads and edits MUST stay within your current working directory.`,
-    `- The merge has already been started — files contain conflict markers (<<<<<<< HEAD, =======, >>>>>>>).`,
-    `- Your job is to resolve ALL conflict markers while preserving BOTH:`,
-    `  1. The accessibility fix from the feature branch (this is the primary intent)`,
-    `  2. Any legitimate upstream changes from ${QA_BRANCH} that don't contradict the fix`,
-    `- When in doubt, favor the accessibility fix — that is the purpose of this branch.`,
-    `- After resolving, there should be ZERO conflict markers (<<<<<<< or ======= or >>>>>>>) in any file.`,
-    `- Do NOT create new files or make changes beyond resolving the conflicts.`,
-    ``,
     `CONTEXT:`,
     `Branch: ${attempt.branch}`,
     `Fix commit: ${fixCommitMsg}`,
@@ -353,12 +368,6 @@ async function buildConflictPrompt(
     ``,
     `CONFLICT DIFFS:`,
     conflictContent,
-    ``,
-    `STEPS:`,
-    `1. Read each conflicted file to see the full conflict markers in context.`,
-    `2. For each file, edit to resolve the conflicts — remove all <<<<<<< ======= >>>>>>> markers.`,
-    `3. Use Grep to verify NO conflict markers remain: grep for "<<<<<<< " across all files.`,
-    `4. Do NOT run git add or git commit — the caller handles that.`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -391,6 +400,8 @@ async function runConflictAgent(prompt: string, worktreeDir: string, issueId?: s
         permissionMode: "acceptEdits",
         model: DEVELOPER_MODEL,
         effort: DEVELOPER_EFFORT,
+        maxTurns: DEVELOPER_MAX_TURNS,
+        systemPrompt: buildConflictSystemPrompt(QA_BRANCH),
       },
       onAssistantMessage: (content) => {
         console.log("[conflict-resolver]", JSON.stringify(content));

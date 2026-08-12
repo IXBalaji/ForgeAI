@@ -1,6 +1,5 @@
 import "dotenv/config";
 import { inArray, and, eq } from "drizzle-orm";
-import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { tickets, iterationCycles } from "../db/schema.js";
 import { notifySlack } from "../lib/notify.js";
@@ -11,11 +10,11 @@ import type { ReleaseReport } from "../types/index.js";
 
 /**
  * Release agent — compiles fixed/parked/flagged into one report and
- * notifies via Slack + email, per architecture doc §01/§06.
+ * notifies via Slack + email, per architecture doc §01/§06. No model calls,
+ * so this isn't wrapped in its own LangSmith span — it already runs inside
+ * the "agent.release" span the orchestrator creates in graph.ts.
  */
-export const runReleaseAgent = traceable(_runReleaseAgent, { name: "release.run", run_type: "chain" });
-
-async function _runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
+export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
   const [cycle] = await db.select().from(iterationCycles).where(eq(iterationCycles.id, cycleId));
   const epicKey = cycle?.epicKey ?? null;
 

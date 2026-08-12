@@ -5,6 +5,27 @@ import { REVIEWER_MODEL, REVIEWER_EFFORT } from "../lib/config.js";
 const QA_BRANCH = `origin/${process.env.GITHUB_QA_BRANCH ?? "qa"}`;
 
 /**
+ * Static review instructions — byte-identical on every review call, so it's
+ * a stable cacheable systemPrompt prefix rather than being re-billed as part
+ * of every diff-specific prompt.
+ */
+const REVIEW_SYSTEM_PROMPT = [
+  "You are reviewing an accessibility fix diff. You did NOT write this code.",
+  "Your job is to check ONLY the changed lines for:",
+  "1. Obvious bugs (null refs, broken syntax, wrong variable names)",
+  "2. Security issues (XSS, injection) in the changed code",
+  "3. Changes that are completely unrelated to accessibility",
+  "",
+  "DO NOT flag: style preferences, missing tests, minor naming choices,",
+  "code that could be 'better', or anything that is a matter of opinion.",
+  "Accessibility fixes often touch HTML attributes, ARIA labels, color contrast,",
+  "focus management, and semantic elements — these are expected and valid.",
+  "",
+  "If the diff is reasonable and does not have obvious bugs, respond with exactly: LGTM",
+  "Only flag BLOCKING issues that would break the application.",
+].join("\n");
+
+/**
  * Adversarial code review — a separate persona/context from the Developer
  * agent, per architecture doc §02: it must not be the same session that
  * wrote the fix. Returns a concern string if it found one, or null for LGTM.
@@ -16,22 +37,7 @@ export async function adversarialReview(worktreeDir: string): Promise<string | n
     const { stdout: diff } = await run("git", ["diff", QA_BRANCH, "--", "."], worktreeDir);
     if (!diff.trim()) return null;
 
-    const prompt = [
-      "You are reviewing an accessibility fix diff. You did NOT write this code.",
-      "Your job is to check ONLY the changed lines for:",
-      "1. Obvious bugs (null refs, broken syntax, wrong variable names)",
-      "2. Security issues (XSS, injection) in the changed code",
-      "3. Changes that are completely unrelated to accessibility",
-      "",
-      "DO NOT flag: style preferences, missing tests, minor naming choices,",
-      "code that could be 'better', or anything that is a matter of opinion.",
-      "Accessibility fixes often touch HTML attributes, ARIA labels, color contrast,",
-      "focus management, and semantic elements — these are expected and valid.",
-      "",
-      "If the diff is reasonable and does not have obvious bugs, respond with exactly: LGTM",
-      "Only flag BLOCKING issues that would break the application.",
-      `\nDiff (changed files only):\n${diff.slice(0, 20000)}`,
-    ].join("\n");
+    const prompt = `Diff (changed files only):\n${diff.slice(0, 20000)}`;
 
     let reviewText = "";
     await traceAnthropicAgentSdkQuery({
@@ -43,7 +49,12 @@ export async function adversarialReview(worktreeDir: string): Promise<string | n
         diff_length: diff.length,
       },
       prompt,
-      sdkOptions: { allowedTools: [], model: REVIEWER_MODEL, effort: REVIEWER_EFFORT },
+      sdkOptions: {
+        allowedTools: [],
+        model: REVIEWER_MODEL,
+        effort: REVIEWER_EFFORT,
+        systemPrompt: REVIEW_SYSTEM_PROMPT,
+      },
       onAssistantMessage: (content) => {
         reviewText += JSON.stringify(content);
       },

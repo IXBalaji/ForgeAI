@@ -15,7 +15,7 @@ export interface TriageResult {
 export const runTriageAgent = traceable(_runTriageAgent, {
   name: "triage.classify_issues",
   run_type: "chain",
-  metadata: { model: "orchestrator" },
+  metadata: { node_kind: "orchestration" },
 });
 
 const SEVERITY_ORDER = ["critical", "serious", "moderate", "minor"] as const;

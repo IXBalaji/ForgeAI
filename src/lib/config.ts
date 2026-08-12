@@ -47,3 +47,12 @@ export const DEVELOPER_MODEL = process.env.CLAUDE_DEVELOPER_MODEL ?? "claude-son
 export const DEVELOPER_EFFORT = process.env.CLAUDE_DEVELOPER_EFFORT ?? "high";
 export const REVIEWER_MODEL = process.env.CLAUDE_REVIEWER_MODEL ?? "claude-sonnet-5";
 export const REVIEWER_EFFORT = process.env.CLAUDE_REVIEWER_EFFORT ?? "medium";
+
+/**
+ * Caps how many agentic turns a single Developer/Autofix/Conflict-resolver SDK
+ * session may take. Without a cap, a session with Bash/Read/Write/Edit access
+ * can explore and iterate indefinitely, which is the dominant driver of
+ * per-ticket token cost. 40 is generous enough for a normal multi-file
+ * accessibility fix while still bounding runaway sessions.
+ */
+export const DEVELOPER_MAX_TURNS = parseInt(process.env.CLAUDE_DEVELOPER_MAX_TURNS ?? "40", 10);

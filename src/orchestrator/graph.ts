@@ -90,28 +90,28 @@ const DEPLOY_SETTLE_MS = parseInt(process.env.DEPLOY_SETTLE_MS ?? "60000", 10);
 
 // ── Nodes ──────────────────────────────────────────────────────────────────
 
+// Scanning (Playwright/axe only, no model call) — not wrapped in runAgentTrace
+// so LangSmith traces retain only nodes that invoke a model or the Claude API.
 async function scanNode(state: typeof CycleState.State) {
-  return runAgentTrace("scanner", async () => {
-    return withSpan("scan.playwright", async () => {
-      if (state.cycleNumber > 0) {
-        console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
-        await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
-      }
-      console.log("[orchestrate] Running Playwright + axe scan...");
-      try {
-        await run("npx", ["playwright", "test"], PROJECT_ROOT);
-      } catch (err) {
-        console.warn("[orchestrate] Some Playwright tests may have failed — continuing with available reports.", (err as Error).message.slice(0, 300));
-      }
-      try {
-        await run("node", ["src/scan/scripts/generate-a11y-report.mjs"], PROJECT_ROOT);
-      } catch (err) {
-        console.warn("[orchestrate] Report generation had issues:", (err as Error).message.slice(0, 300));
-      }
-      console.log("[orchestrate] Scan complete.");
-      setPipelineCycleNumber(state.cycleNumber + 1);
-      return { cycleNumber: state.cycleNumber + 1, freshScan: true };
-    });
+  return withSpan("scan.playwright", async () => {
+    if (state.cycleNumber > 0) {
+      console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
+      await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
+    }
+    console.log("[orchestrate] Running Playwright + axe scan...");
+    try {
+      await run("npx", ["playwright", "test"], PROJECT_ROOT);
+    } catch (err) {
+      console.warn("[orchestrate] Some Playwright tests may have failed — continuing with available reports.", (err as Error).message.slice(0, 300));
+    }
+    try {
+      await run("node", ["src/scan/scripts/generate-a11y-report.mjs"], PROJECT_ROOT);
+    } catch (err) {
+      console.warn("[orchestrate] Report generation had issues:", (err as Error).message.slice(0, 300));
+    }
+    console.log("[orchestrate] Scan complete.");
+    setPipelineCycleNumber(state.cycleNumber + 1);
+    return { cycleNumber: state.cycleNumber + 1, freshScan: true };
   });
 }
 
@@ -133,13 +133,8 @@ function routeAfterTriage(state: typeof CycleState.State) {
   return "prepareBranch";
 }
 
+// Git/DB setup only, no model call — not wrapped in runAgentTrace.
 async function prepareBranchNode(state: typeof CycleState.State) {
-  return runAgentTrace("prepare_branch", async () => {
-    return _prepareBranchLogic(state);
-  });
-}
-
-async function _prepareBranchLogic(state: typeof CycleState.State) {
   const epicKey = state.epicKey;
 
   const openTickets = epicKey
@@ -227,21 +222,20 @@ function routeAfterFix(state: typeof CycleState.State) {
   return "pushBranch";
 }
 
+// git push only, no model call — not wrapped in runAgentTrace.
 async function pushBranchNode(state: typeof CycleState.State) {
-  return runAgentTrace("push_branch", async () => {
-    const releaseLock = await gitRepoMutex.acquire();
-    try {
-      if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-        const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
-        await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
-      }
-      await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
-      console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
-    } finally {
-      releaseLock();
+  const releaseLock = await gitRepoMutex.acquire();
+  try {
+    if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
+      const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+      await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
     }
-    return {};
-  });
+    await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
+    console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
+  } finally {
+    releaseLock();
+  }
+  return {};
 }
 
 async function reviewerNode(state: typeof CycleState.State) {
@@ -299,27 +293,26 @@ async function deployNode(state: typeof CycleState.State) {
   });
 }
 
+// Worktree/DB cleanup only, no model call — not wrapped in runAgentTrace.
 async function cleanupNode(state: typeof CycleState.State) {
-  return runAgentTrace("cleanup", async () => {
-    if (!state.worktreeDir) return {};
-    const releaseLock = await gitRepoMutex.acquire();
-    try {
-      await run("git", ["worktree", "remove", "--force", state.worktreeDir], TARGET_REPO_PATH);
-    } catch {
-      console.warn(`[orchestrate] Could not remove worktree at ${state.worktreeDir}.`);
-    } finally {
-      releaseLock();
-    }
+  if (!state.worktreeDir) return {};
+  const releaseLock = await gitRepoMutex.acquire();
+  try {
+    await run("git", ["worktree", "remove", "--force", state.worktreeDir], TARGET_REPO_PATH);
+  } catch {
+    console.warn(`[orchestrate] Could not remove worktree at ${state.worktreeDir}.`);
+  } finally {
+    releaseLock();
+  }
 
-    // Reset unfixed tickets back to open
-    if (state.reviewVerdict === "rejected") {
-      for (const ticketId of state.fixedTicketIds) {
-        await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
-      }
+  // Reset unfixed tickets back to open
+  if (state.reviewVerdict === "rejected") {
+    for (const ticketId of state.fixedTicketIds) {
+      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     }
+  }
 
-    return { branch: null, worktreeDir: null, openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0 };
-  });
+  return { branch: null, worktreeDir: null, openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0 };
 }
 
 function routeAfterCleanup(state: typeof CycleState.State) {

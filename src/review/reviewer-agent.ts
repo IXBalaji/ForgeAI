@@ -33,7 +33,7 @@ export interface BranchReviewVerdict {
 export const runReviewerAgent = traceable(_runReviewerAgent, {
   name: "reviewer.run",
   run_type: "chain",
-  metadata: { model: "orchestrator" },
+  metadata: { node_kind: "orchestration" },
 });
 
 async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict> {
@@ -236,7 +236,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
 export const reviewBranch = traceable(_reviewBranch, {
   name: "reviewer.review_branch",
   run_type: "chain",
-  metadata: { model: "orchestrator" },
+  metadata: { node_kind: "orchestration" },
 });
 
 async function _reviewBranch(

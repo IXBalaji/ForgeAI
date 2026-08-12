@@ -9,8 +9,8 @@ import { db } from "../db/client.js";
 import { tickets, fixAttempts, issues } from "../db/schema.js";
 import { run } from "../lib/exec.js";
 import { transitionTicket } from "../integrations/jira.js";
-import { LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT } from "../lib/config.js";
-import { buildPrompt } from "./prompt-builder.js";
+import { LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT, DEVELOPER_MAX_TURNS } from "../lib/config.js";
+import { buildSystemPrompt, buildUserPrompt } from "./prompt-builder.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
@@ -19,7 +19,7 @@ const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
 const GITHUB_OWNER = process.env.GITHUB_OWNER ?? "";
 const GITHUB_REPO = process.env.GITHUB_REPO ?? "";
-const MAX_RETRIES = parseInt(process.env.DEVELOPER_MAX_RETRIES ?? "2", 10);
+const MAX_RETRIES = parseInt(process.env.DEVELOPER_MAX_RETRIES ?? "1", 10);
 
 export interface DeveloperResult {
   fixAttemptId: string | null;
@@ -56,7 +56,12 @@ async function ensureWorktree(branch: string, worktreeDir: string): Promise<void
 async function runAgentWithRetry(
   prompt: string,
   worktreeDir: string,
-  opts?: { issue_id?: string | null; operation_name?: string; agent_name?: PipelineAgentName },
+  opts?: {
+    issue_id?: string | null;
+    operation_name?: string;
+    agent_name?: PipelineAgentName;
+    systemPrompt?: string;
+  },
 ): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.warn("[developer] ANTHROPIC_API_KEY not set — skipping the actual fix, worktree left in place.");
@@ -83,6 +88,8 @@ async function runAgentWithRetry(
         permissionMode: "acceptEdits",
         model: DEVELOPER_MODEL,
         effort: DEVELOPER_EFFORT,
+        maxTurns: DEVELOPER_MAX_TURNS,
+        ...(opts?.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       },
       onAssistantMessage: (content) => {
         console.log("[developer]", JSON.stringify(content));
@@ -153,12 +160,13 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   }
 
   // Claude SDK fix runs unlocked — multiple tickets fix in parallel
-  const prompt = await buildPrompt(ticketId);
+  const systemPrompt = buildSystemPrompt();
+  const prompt = await buildUserPrompt(ticketId);
   console.log(`[developer] ── SDK agent starting for ticket ${ticketId} on branch ${branch} ──`);
   console.log(`[developer]   Worktree: ${worktreeDir}`);
-  console.log(`[developer]   Prompt length: ${prompt.length} chars`);
+  console.log(`[developer]   Prompt length: ${prompt.length} chars (system: ${systemPrompt.length} chars)`);
   const sdkStart = Date.now();
-  await runAgentWithRetry(prompt, worktreeDir, { issue_id: ticketId, operation_name: "generate_fix" });
+  await runAgentWithRetry(prompt, worktreeDir, { issue_id: ticketId, operation_name: "generate_fix", systemPrompt });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
   console.log(`[developer] ── SDK agent finished for ticket ${ticketId} (${sdkDuration}s) ──`);
 
@@ -327,11 +335,12 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
     return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
   }
 
-  const prompt = await buildPrompt(ticketId);
+  const systemPrompt = buildSystemPrompt();
+  const prompt = await buildUserPrompt(ticketId);
   const jiraRef = ticket?.jiraKey ?? ticketId.slice(0, 8);
   console.log(`[developer] ── SDK agent starting for ${jiraRef} ──`);
   const sdkStart = Date.now();
-  await runAgentWithRetry(prompt, worktreeDir, { issue_id: ticketId, operation_name: "generate_fix" });
+  await runAgentWithRetry(prompt, worktreeDir, { issue_id: ticketId, operation_name: "generate_fix", systemPrompt });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
   console.log(`[developer] ── SDK agent finished for ${jiraRef} (${sdkDuration}s) ──`);
 
@@ -407,7 +416,11 @@ async function _fixBuildErrors(worktreeDir: string, reviewComments: string): Pro
 
   console.log(`[developer] ── Autofix starting for build errors ──`);
   const sdkStart = Date.now();
-  await runAgentWithRetry(prompt, worktreeDir, { operation_name: "fix_build_errors", agent_name: "autofix" });
+  await runAgentWithRetry(prompt, worktreeDir, {
+    operation_name: "fix_build_errors",
+    agent_name: "autofix",
+    systemPrompt: buildSystemPrompt(),
+  });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
   console.log(`[developer] ── Autofix finished (${sdkDuration}s) ──`);
 

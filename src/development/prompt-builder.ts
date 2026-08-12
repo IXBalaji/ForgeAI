@@ -7,14 +7,50 @@ const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const REPORT_DIR = process.env.A11Y_REPORT_DIR ?? join(process.cwd(), "a11y-reports");
 
 /**
- * Builds the prompt handed to the Claude Agent SDK session: the ticket's
- * concrete findings (rule, selector, page — not the whole codebase), retry
- * context from prior rejected attempts, and repo conventions if a CLAUDE.md
- * exists. See the architecture doc §02 "How the Developer agent gets code
- * context" — it explores the repo itself via Read/Grep/Glob, it doesn't need
- * the code pre-loaded here.
+ * Static, ticket-independent instructions handed to the Claude Agent SDK
+ * session as its systemPrompt: worktree-safety rules, repo conventions
+ * (CLAUDE.md, if present), and the fix/build/verification steps. This text
+ * is byte-identical across every ticket, retry, and autofix call in a run,
+ * so putting it in systemPrompt (rather than concatenating it into the
+ * per-ticket prompt) lets the SDK/API cache it instead of re-billing it
+ * on every call.
  */
-export async function buildPrompt(ticketId: string): Promise<string> {
+export function buildSystemPrompt(): string {
+  const conventionsPath = join(TARGET_REPO_PATH, "CLAUDE.md");
+  const conventions = existsSync(conventionsPath) ? readFileSync(conventionsPath, "utf-8") : "";
+
+  return [
+    `CRITICAL: You are working inside a git worktree. ALL file reads and edits MUST stay within your current working directory.`,
+    `- Do NOT navigate to, read from, or edit files in any other directory on the filesystem.`,
+    `- Do NOT follow localhost URLs to discover source paths outside your working directory.`,
+    `- The page URLs given in findings are for context only — find the corresponding source files by searching within your current working directory using Grep and Glob.`,
+    `- If you cannot find a file in your working directory, it may not exist on this branch. Do NOT look for it elsewhere.`,
+    conventions ? `\nRepo conventions (CLAUDE.md):\n${conventions}` : "",
+    `\nFix every instance listed in the findings you're given. Make the smallest change that resolves the issue —`,
+    `don't refactor unrelated code.`,
+    ``,
+    `BUILD VALIDATION (MANDATORY — do this BEFORE finishing):`,
+    `1. Run the project's build command (e.g. "npm run build" or "npx tsc --noEmit") in your working directory.`,
+    `2. If the build fails, fix ALL errors — especially unused imports (TS6133), type errors, and syntax errors.`,
+    `3. When you remove or replace an import's usage, ALWAYS check whether the import itself is now unused and remove it.`,
+    `4. Run the build again to confirm it passes. Do NOT finish with a broken build.`,
+    ``,
+    `VERIFICATION: After making your changes, use Grep to confirm that the problematic patterns`,
+    `(missing attributes, incorrect HTML) are no longer present in the files you edited.`,
+    `If the selector references a component, search for all instances of that component to fix them all.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+/**
+ * Per-ticket, variable content: the concrete findings (rule, selector, page —
+ * not the whole codebase) and retry context from prior rejected attempts.
+ * See the architecture doc §02 "How the Developer agent gets code context" —
+ * it explores the repo itself via Read/Grep/Glob, it doesn't need the code
+ * pre-loaded here.
+ */
+export async function buildUserPrompt(ticketId: string): Promise<string> {
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
   if (!ticket) throw new Error(`Ticket ${ticketId} not found`);
 
@@ -39,9 +75,6 @@ export async function buildPrompt(ticketId: string): Promise<string> {
       priorFeedback.push(`Attempt ${attempt.attemptNumber} was rejected: ${review.comments}`);
     }
   }
-
-  const conventionsPath = join(TARGET_REPO_PATH, "CLAUDE.md");
-  const conventions = existsSync(conventionsPath) ? readFileSync(conventionsPath, "utf-8") : "";
 
   // Enrich findings with HTML snippets and fix suggestions from the scan reports
   // so the SDK agent knows exactly what DOM element to target in source code.
@@ -77,30 +110,11 @@ export async function buildPrompt(ticketId: string): Promise<string> {
   return [
     `You are fixing an accessibility issue category: "${ticket.category}".`,
     ``,
-    `CRITICAL: You are working inside a git worktree. ALL file reads and edits MUST stay within your current working directory.`,
-    `- Do NOT navigate to, read from, or edit files in any other directory on the filesystem.`,
-    `- Do NOT follow localhost URLs to discover source paths outside your working directory.`,
-    `- The page URLs below are for context only — find the corresponding source files by searching within your current working directory using Grep and Glob.`,
-    `- If you cannot find a file in your working directory, it may not exist on this branch. Do NOT look for it elsewhere.`,
-    ``,
     `Findings from the automated scan (WCAG rule, DOM selector, page):`,
     findings,
     priorFeedback.length
       ? `\nPrior attempts on this ticket were rejected — do not repeat these mistakes:\n${priorFeedback.join("\n")}`
       : "",
-    conventions ? `\nRepo conventions (CLAUDE.md):\n${conventions}` : "",
-    `\nFix every instance listed above. Make the smallest change that resolves the issue —`,
-    `don't refactor unrelated code.`,
-    ``,
-    `BUILD VALIDATION (MANDATORY — do this BEFORE finishing):`,
-    `1. Run the project's build command (e.g. "npm run build" or "npx tsc --noEmit") in your working directory.`,
-    `2. If the build fails, fix ALL errors — especially unused imports (TS6133), type errors, and syntax errors.`,
-    `3. When you remove or replace an import's usage, ALWAYS check whether the import itself is now unused and remove it.`,
-    `4. Run the build again to confirm it passes. Do NOT finish with a broken build.`,
-    ``,
-    `VERIFICATION: After making your changes, use Grep to confirm that the problematic patterns`,
-    `(missing attributes, incorrect HTML) are no longer present in the files you edited.`,
-    `If the selector references a component, search for all instances of that component to fix them all.`,
   ]
     .filter(Boolean)
     .join("\n");
