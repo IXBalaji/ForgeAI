@@ -11,12 +11,14 @@ import { testGate } from "./test-gate.js";
 import { adversarialReview } from "./adversarial-review.js";
 import { startEphemeralPreview } from "./ephemeral-preview.js";
 import { runAxeScan, fingerprintFinding } from "../scan/axe-scan.js";
-import { transitionTicket } from "../integrations/jira.js";
+import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "qa";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
+
+const tracker = getTrackerProvider();
 
 export interface ReviewerVerdict {
   reviewResultId: string;
@@ -204,16 +206,16 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   // Ticket status transition — see architecture doc §01/§06 for the park/flag rules.
   if (verdict === "approved" && guard.flagged) {
     await db.update(tickets).set({ status: "flagged" }).where(eq(tickets.id, attempt.ticketId));
-    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "In Review");
+    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "In Review");
   } else if (verdict === "rejected" && attempt.attemptNumber >= 2) {
     await db.update(tickets).set({ status: "parked" }).where(eq(tickets.id, attempt.ticketId));
-    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
   } else if (verdict === "rejected") {
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, attempt.ticketId));
-    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
   } else if (verdict === "approved") {
     // Clean approval — stays "in_review" in DB; Deploy agent sets "done".
-    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "In Review");
+    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "In Review");
   }
 
   releaseLock = await gitRepoMutex.acquire();
