@@ -28,6 +28,7 @@ import { withSpan } from "../integrations/observability.js";
 import { runAgentTrace } from "../observability/agent-tracing.js";
 import { runIssueResolutionPipeline } from "../observability/anthropic-tracing.js";
 import { runWithPipelineContext, setPipelineCycleNumber } from "../observability/pipeline-context.js";
+import { SilentLangGraphTracer } from "../observability/silent-langgraph-tracer.js";
 import { run } from "../lib/exec.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
@@ -402,7 +403,13 @@ async function _runOrchestratorCycle() {
           retryCount: 0,
           freshScan: true,
         },
-        { configurable: { thread_id: cycle.id }, callbacks: [] },
+        {
+          configurable: { thread_id: cycle.id },
+          // Suppresses LangGraph's internal run tracing (_start_, ChannelWrite, node
+          // wrapper runs) — the meaningful agent.* / anthropic.* runs attach directly
+          // to the root "ForgeAI" run instead (see agent-tracing.ts).
+          callbacks: [new SilentLangGraphTracer()],
+        },
       );
     }),
   );

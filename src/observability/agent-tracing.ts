@@ -1,4 +1,4 @@
-import { traceable, getCurrentRunTree } from "langsmith/traceable";
+import { withRunTree } from "langsmith/traceable";
 import { getPipelineContext } from "./pipeline-context.js";
 import type { PipelineAgentName } from "./pipeline-context.js";
 
@@ -20,8 +20,10 @@ function pipelineMetadata(): Record<string, unknown> {
 }
 
 /**
- * Wrap one agent invocation as a LangSmith child run (agent.triage, agent.developer, …).
- * Falls back to a direct call when LangSmith tracing is disabled.
+ * Wrap one agent invocation as a LangSmith run (agent.triage, agent.developer, …),
+ * attached directly to the root "ForgeAI" run rather than whatever LangGraph node
+ * happens to be executing — keeps agent.* runs visible without LangGraph's internal
+ * _start_/ChannelWrite/node-wrapper plumbing in between.
  */
 export async function runAgentTrace<T>(
   agentName: PipelineAgentName,
@@ -33,59 +35,71 @@ export async function runAgentTrace<T>(
   }
 
   const ctx = getPipelineContext();
-  const startIdx = ctx?.accumulator.recordCount() ?? 0;
+  const rootRunTree = ctx?.root_run_tree;
+  if (!ctx || !rootRunTree) {
+    return fn();
+  }
 
-  const runner = traceable(
-    async () => {
-      const result = await fn();
+  const startIdx = ctx.accumulator.recordCount();
+  const runTree = rootRunTree.createChild({
+    name: `agent.${agentName}`,
+    run_type: "chain",
+    inputs: {},
+    extra: { metadata: { ...pipelineMetadata(), ...metadata } },
+  });
 
-      try {
-        if (ctx) {
-          const totals = ctx.accumulator.totalsForAgentSince(agentName, startIdx);
-          if (totals.anthropic_call_count > 0) {
-            const models = ctx.accumulator.modelsForAgentSince(agentName, startIdx);
-            const runTree = getCurrentRunTree();
-            runTree.outputs = {
-              ...(runTree.outputs ?? {}),
-              input_tokens: totals.input_tokens,
-              output_tokens: totals.output_tokens,
-              total_tokens: totals.total_tokens,
-              input_cost: totals.input_cost,
-              output_cost: totals.output_cost,
-              total_cost: totals.total_cost,
-              currency: "USD",
-              models_used: models,
-              api_calls: totals.anthropic_call_count,
-            };
-            (runTree as any).prompt_tokens = totals.input_tokens;
-            (runTree as any).completion_tokens = totals.output_tokens;
-            (runTree as any).total_tokens = totals.total_tokens;
-            runTree.extra = {
-              ...runTree.extra,
-              metadata: {
-                ...(runTree.extra?.metadata as Record<string, unknown> ?? {}),
-                input_tokens: totals.input_tokens,
-                output_tokens: totals.output_tokens,
-                total_tokens: totals.total_tokens,
-                input_cost: totals.input_cost,
-                output_cost: totals.output_cost,
-                total_cost: totals.total_cost,
-                models_used: models,
-              },
-            };
-          }
-        }
-      } catch {
-        // tracing must not break the pipeline
-      }
+  try {
+    const result = await withRunTree(runTree, fn);
 
-      return result;
-    },
-    {
-      name: `agent.${agentName}`,
-      run_type: "chain",
-      metadata: { ...pipelineMetadata(), ...metadata },
-    },
-  );
-  return runner();
+    const totals = ctx.accumulator.totalsForAgentSince(agentName, startIdx);
+    const outputs: Record<string, unknown> = { completion_status: "success" };
+    if (totals.anthropic_call_count > 0) {
+      const models = ctx.accumulator.modelsForAgentSince(agentName, startIdx);
+      Object.assign(outputs, {
+        input_tokens: totals.input_tokens,
+        output_tokens: totals.output_tokens,
+        total_tokens: totals.total_tokens,
+        input_cost: totals.input_cost,
+        output_cost: totals.output_cost,
+        total_cost: totals.total_cost,
+        currency: "USD",
+        models_used: models,
+        api_calls: totals.anthropic_call_count,
+      });
+      (runTree as any).prompt_tokens = totals.input_tokens;
+      (runTree as any).completion_tokens = totals.output_tokens;
+      (runTree as any).total_tokens = totals.total_tokens;
+      runTree.extra = {
+        ...runTree.extra,
+        metadata: {
+          ...(runTree.extra?.metadata as Record<string, unknown> ?? {}),
+          input_tokens: totals.input_tokens,
+          output_tokens: totals.output_tokens,
+          total_tokens: totals.total_tokens,
+          input_cost: totals.input_cost,
+          output_cost: totals.output_cost,
+          total_cost: totals.total_cost,
+          models_used: models,
+        },
+      };
+    }
+
+    runTree.outputs = outputs;
+    await runTree.end(outputs);
+    try {
+      await runTree.postRun();
+    } catch {
+      // tracing must not break the pipeline
+    }
+
+    return result;
+  } catch (err) {
+    try {
+      await runTree.end(undefined, (err as Error).message);
+      await runTree.postRun();
+    } catch {
+      // tracing must not break the pipeline
+    }
+    throw err;
+  }
 }

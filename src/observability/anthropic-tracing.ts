@@ -14,6 +14,7 @@ import { sanitizeForTrace } from "./sanitize.js";
 import {
   getPipelineContext,
   recordAnthropicUsage,
+  setPipelineRootRunTree,
   type PipelineAgentName,
 } from "./pipeline-context.js";
 
@@ -459,7 +460,11 @@ export function attachPipelineRootSummary(runTree: RunTree): void {
 }
 
 export const runIssueResolutionPipeline = traceable(
-  async (fn: () => Promise<void>) => fn(),
+  async (fn: () => Promise<void>) => {
+    const runTree = getCurrentRunTree();
+    if (runTree) setPipelineRootRunTree(runTree);
+    return fn();
+  },
   {
     name: "ForgeAI",
     run_type: "chain",

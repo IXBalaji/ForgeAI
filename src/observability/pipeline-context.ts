@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { RunTree } from "langsmith/run_trees";
 
 export type PipelineAgentName =
   | "scanner"
@@ -141,6 +142,8 @@ export interface PipelineContext {
   pipeline_run_id: string;
   cycle_number: number;
   accumulator: UsageAccumulator;
+  /** Root "ForgeAI" LangSmith run — agent runs attach here directly, bypassing LangGraph's internal run tree. */
+  root_run_tree?: RunTree;
 }
 
 const storage = new AsyncLocalStorage<PipelineContext>();
@@ -166,6 +169,11 @@ export function getPipelineContext(): PipelineContext | undefined {
 export function setPipelineCycleNumber(cycleNumber: number): void {
   const ctx = storage.getStore();
   if (ctx) ctx.cycle_number = cycleNumber;
+}
+
+export function setPipelineRootRunTree(runTree: RunTree): void {
+  const ctx = storage.getStore();
+  if (ctx) ctx.root_run_tree = runTree;
 }
 
 export function recordAnthropicUsage(snapshot: AnthropicUsageSnapshot): void {

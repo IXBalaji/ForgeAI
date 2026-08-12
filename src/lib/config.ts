@@ -29,6 +29,9 @@ export const LABEL_PREFIX_SLUG = LABEL_PREFIX.toLowerCase();
 /** The actual Jira project key to file tickets under — defaults to PROJECT_KEY. */
 export const JIRA_PROJECT_KEY = process.env.JIRA_PROJECT_KEY ?? PROJECT_KEY;
 
+/** Base URL of the Jira instance (e.g. "https://foo.atlassian.net") — used to link tickets. */
+export const JIRA_BASE_URL = process.env.JIRA_BASE_URL;
+
 export { PROJECT_KEY };
 
 /**

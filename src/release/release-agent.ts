@@ -5,6 +5,7 @@ import { db } from "../db/client.js";
 import { tickets, iterationCycles } from "../db/schema.js";
 import { notifySlack } from "../lib/notify.js";
 import { sendEmail } from "../integrations/email.js";
+import { renderReleaseReportHtml, renderReleaseReportText } from "../integrations/report-template.js";
 import { LABEL_PREFIX } from "../lib/config.js";
 import type { ReleaseReport } from "../types/index.js";
 
@@ -30,14 +31,14 @@ async function _runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
     epicFilter ? and(eq(tickets.status, "flagged"), epicFilter) : eq(tickets.status, "flagged"),
   );
 
-  const reportBody = [
-    `**Fixed & verified (${doneTickets.length}):**`,
-    ...doneTickets.map((t) => `- ${t.jiraKey ?? t.id}: ${t.category}`),
-    `\n**Parked — failed automated review twice, needs a manual fix (${parkedTickets.length}):**`,
-    ...parkedTickets.map((t) => `- ${t.jiraKey ?? t.id}: ${t.category}`),
-    `\n**Flagged — scope guard held this out of the merge, needs manual review (${flaggedTickets.length}):**`,
-    ...flaggedTickets.map((t) => `- ${t.jiraKey ?? t.id}: ${t.category}`),
-  ].join("\n");
+  const reportData = {
+    projectLabel: LABEL_PREFIX,
+    cycleId,
+    generatedAt: new Date(),
+    fixed: doneTickets.map((t) => ({ jiraKey: t.jiraKey, id: t.id, category: t.category })),
+    parked: parkedTickets.map((t) => ({ jiraKey: t.jiraKey, id: t.id, category: t.category })),
+    flagged: flaggedTickets.map((t) => ({ jiraKey: t.jiraKey, id: t.id, category: t.category })),
+  };
 
   const report: ReleaseReport = {
     cycleId,
@@ -53,7 +54,11 @@ async function _runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
     `${parkedTickets.length} parked, ${flaggedTickets.length} flagged.`;
 
   await notifySlack(summaryLine);
-  await sendEmail(`[${LABEL_PREFIX}] Accessibility cycle ${cycleId} report`, `${summaryLine}\n\n${reportBody}`);
+  await sendEmail(
+    `[${LABEL_PREFIX}] Accessibility cycle ${cycleId} report`,
+    renderReleaseReportText(reportData),
+    renderReleaseReportHtml(reportData),
+  );
 
   return report;
 }

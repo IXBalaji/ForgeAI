@@ -1,12 +1,12 @@
 import "dotenv/config";
 import { eq } from "drizzle-orm";
-import { LABEL_PREFIX, JIRA_PROJECT_KEY } from "../lib/config.js";
+import { LABEL_PREFIX, JIRA_PROJECT_KEY, JIRA_BASE_URL } from "../lib/config.js";
 import { db } from "../db/client.js";
 import { iterationCycles } from "../db/schema.js";
 
 const JIRA_SUMMARY_MAX = 255;
 
-const { JIRA_BASE_URL, JIRA_EMAIL, JIRA_API_TOKEN } = process.env;
+const { JIRA_EMAIL, JIRA_API_TOKEN } = process.env;
 
 function truncateSummary(summary: string): string {
   if (summary.length <= JIRA_SUMMARY_MAX) return summary;

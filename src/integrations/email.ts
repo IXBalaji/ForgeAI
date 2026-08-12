@@ -16,7 +16,7 @@ const transporter = isEmailConfigured()
     })
   : null;
 
-export async function sendEmail(subject: string, body: string): Promise<void> {
+export async function sendEmail(subject: string, text: string, html?: string): Promise<void> {
   if (!transporter) {
     console.warn("[email] SMTP not configured — report was not emailed.");
     return;
@@ -29,8 +29,8 @@ export async function sendEmail(subject: string, body: string): Promise<void> {
       from: EMAIL_FROM,
       to: recipients,
       subject,
-      text: body,
-      html: body.replace(/\n/g, "<br>"),
+      text,
+      html: html ?? text.replace(/\n/g, "<br>"),
     });
   } catch (err) {
     console.warn("[email] Failed to send report:", err instanceof Error ? err.message : err);
