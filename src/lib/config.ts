@@ -35,24 +35,37 @@ export const JIRA_BASE_URL = process.env.JIRA_BASE_URL;
 export { PROJECT_KEY };
 
 /**
- * Model/effort tiering for cost efficiency (architecture doc §06): Sonnet
- * instead of Opus for both agents that call Claude directly, since neither
- * needs frontier-model reasoning for a single scoped accessibility fix or
- * review — Opus is the override for cases that need it, not the default.
- * Developer runs at higher effort (it's generating the actual fix); Reviewer
- * at medium (it's verifying, not authoring).
+ * Model/effort tiering for cost efficiency. Developer/Reviewer/Conflict-resolver
+ * default to Haiku 4.5 — the model that was actually running (and driving the
+ * known-good ~$0.10/ticket cost baseline) before this project's SDK upgrade.
+ * Override via env if a target project's fixes need Sonnet/Opus-level
+ * reasoning; that's an explicit opt-in, not the default.
  */
 export const CLASSIFIER_MODEL = process.env.CLASSIFIER_MODEL ?? "claude-haiku-4-5-20251001";
-export const DEVELOPER_MODEL = process.env.CLAUDE_DEVELOPER_MODEL ?? "claude-sonnet-5";
-export const DEVELOPER_EFFORT = process.env.CLAUDE_DEVELOPER_EFFORT ?? "high";
-export const REVIEWER_MODEL = process.env.CLAUDE_REVIEWER_MODEL ?? "claude-sonnet-5";
+export const DEVELOPER_MODEL = process.env.CLAUDE_DEVELOPER_MODEL ?? "claude-haiku-4-5-20251001";
+/**
+ * "high" enables deep adaptive thinking, which is billed as output tokens —
+ * expensive on a per-turn agentic session and not needed for a scoped,
+ * mostly mechanical accessibility fix. Kept at "low" (with thinking disabled
+ * below) regardless of which model is configured above.
+ */
+export const DEVELOPER_EFFORT = process.env.CLAUDE_DEVELOPER_EFFORT ?? "medium";
+export const REVIEWER_MODEL = process.env.CLAUDE_REVIEWER_MODEL ?? "claude-haiku-4-5-20251001";
 export const REVIEWER_EFFORT = process.env.CLAUDE_REVIEWER_EFFORT ?? "medium";
 
 /**
  * Caps how many agentic turns a single Developer/Autofix/Conflict-resolver SDK
  * session may take. Without a cap, a session with Bash/Read/Write/Edit access
- * can explore and iterate indefinitely, which is the dominant driver of
- * per-ticket token cost. 40 is generous enough for a normal multi-file
- * accessibility fix while still bounding runaway sessions.
+ * can explore and iterate indefinitely, which is a dominant driver of
+ * per-ticket token cost. Combined with low effort (above), 20 turns is still
+ * generous for a normal single-category accessibility fix.
  */
-export const DEVELOPER_MAX_TURNS = parseInt(process.env.CLAUDE_DEVELOPER_MAX_TURNS ?? "40", 10);
+export const DEVELOPER_MAX_TURNS = parseInt(process.env.CLAUDE_DEVELOPER_MAX_TURNS ?? "20", 10);
+
+/**
+ * Selects which VCS host / issue tracker adapter this deployment uses.
+ * One provider per deployment — set once at startup, no runtime switching.
+ * Defaults preserve today's only-ever-used configuration.
+ */
+export const VCS_PROVIDER = process.env.VCS_PROVIDER ?? "github";
+export const TRACKER_PROVIDER = process.env.TRACKER_PROVIDER ?? "jira";
