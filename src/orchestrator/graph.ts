@@ -23,7 +23,8 @@ import { fixTicketOnBranch, fixBuildErrors, type BatchFixResult } from "../devel
 import { reviewBranch } from "../review/reviewer-agent.js";
 import { deployBranch } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
-import { ensureEpic } from "../integrations/jira.js";
+import { getTrackerProvider } from "../integrations/tracker/factory.js";
+import { getVcsProvider } from "../integrations/vcs/factory.js";
 import { withSpan } from "../integrations/observability.js";
 import { runAgentTrace } from "../observability/agent-tracing.js";
 import { runIssueResolutionPipeline } from "../observability/anthropic-tracing.js";
@@ -40,9 +41,9 @@ const MAX_REVIEW_RETRIES = parseInt(process.env.MAX_REVIEW_RETRIES ?? "2", 10);
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
-const GITHUB_OWNER = process.env.GITHUB_OWNER ?? "";
-const GITHUB_REPO = process.env.GITHUB_REPO ?? "";
+
+const tracker = getTrackerProvider();
+const vcs = getVcsProvider();
 
 const CycleState = Annotation.Root({
   cycleId: Annotation<string>,
@@ -118,7 +119,7 @@ async function scanNode(state: typeof CycleState.State) {
 async function triageNode(state: typeof CycleState.State) {
   return runAgentTrace("triage", async () => {
     console.log("[orchestrate] Running triage from reports...");
-    const epicKey = state.epicKey ?? (await ensureEpic(state.cycleId));
+    const epicKey = state.epicKey ?? (await tracker.ensureEpic(state.cycleId));
     const result = await triageFromReports({ cycleId: state.cycleId });
     console.log(`[orchestrate] Triage complete: ${result.dbSync.ticketsCreated} ticket(s) created, ${result.summary.totalViolationTypes} violation type(s).`);
     return { epicKey };
@@ -226,8 +227,8 @@ function routeAfterFix(state: typeof CycleState.State) {
 async function pushBranchNode(state: typeof CycleState.State) {
   const releaseLock = await gitRepoMutex.acquire();
   try {
-    if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-      const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+    const authRemote = vcs.authenticatedRemoteUrl();
+    if (authRemote) {
       await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
     }
     await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
@@ -268,8 +269,8 @@ async function autofixNode(state: typeof CycleState.State) {
       console.log(`[orchestrate] Autofix committed: ${commitSha.slice(0, 7)} — re-pushing...`);
       const releaseLock = await gitRepoMutex.acquire();
       try {
-        if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-          const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+        const authRemote = vcs.authenticatedRemoteUrl();
+        if (authRemote) {
           await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
         }
         await run("git", ["-c", "credential.helper=", "push", "origin", state.branch!], state.worktreeDir!);

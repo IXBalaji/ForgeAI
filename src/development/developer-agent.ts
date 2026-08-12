@@ -8,7 +8,8 @@ import type { PipelineAgentName } from "../observability/pipeline-context.js";
 import { db } from "../db/client.js";
 import { tickets, fixAttempts, issues } from "../db/schema.js";
 import { run } from "../lib/exec.js";
-import { transitionTicket } from "../integrations/jira.js";
+import { getTrackerProvider } from "../integrations/tracker/factory.js";
+import { getVcsProvider } from "../integrations/vcs/factory.js";
 import { LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT, DEVELOPER_MAX_TURNS } from "../lib/config.js";
 import { buildSystemPrompt, buildUserPrompt } from "./prompt-builder.js";
 import { gitRepoMutex } from "../lib/mutex.js";
@@ -16,10 +17,10 @@ import { gitRepoMutex } from "../lib/mutex.js";
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "qa";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
-const GITHUB_OWNER = process.env.GITHUB_OWNER ?? "";
-const GITHUB_REPO = process.env.GITHUB_REPO ?? "";
 const MAX_RETRIES = parseInt(process.env.DEVELOPER_MAX_RETRIES ?? "1", 10);
+
+const tracker = getTrackerProvider();
+const vcs = getVcsProvider();
 
 export interface DeveloperResult {
   fixAttemptId: string | null;
@@ -88,6 +89,10 @@ async function runAgentWithRetry(
         permissionMode: "acceptEdits",
         model: DEVELOPER_MODEL,
         effort: DEVELOPER_EFFORT,
+        // Extended/adaptive thinking is billed as output tokens and is the
+        // dominant cost driver on a multi-turn agentic session — a scoped,
+        // mechanical accessibility fix doesn't need it.
+        thinking: { type: "disabled" },
         maxTurns: DEVELOPER_MAX_TURNS,
         ...(opts?.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       },
@@ -111,7 +116,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
 
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
   if (ticket?.jiraKey) {
-    await transitionTicket(ticket.jiraKey, "In Progress");
+    await tracker.transitionTicket(ticket.jiraKey, "In Progress");
   }
 
   const existingAttempts = await db
@@ -150,7 +155,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     } else {
       console.warn(`[developer]   ⚠ The ticket has an empty issueIds array — triage may not have linked any issues to it.`);
     }
-    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     const cleanupLock = await gitRepoMutex.acquire();
     try {
@@ -241,8 +246,8 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     }
 
     if (commitSha) {
-      if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-        const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+      const authRemote = vcs.authenticatedRemoteUrl();
+      if (authRemote) {
         await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
       }
 
@@ -257,7 +262,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
           if (isLast) {
             pushStatus = "failed";
             console.error(`[developer] Push failed after ${PUSH_MAX_RETRIES} attempts for branch ${branch}.`, err);
-            if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+            if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
             await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
             throw err;
           }
@@ -273,7 +278,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     // recovery logic retries it on the next cycle.
     if (!commitSha) {
       console.warn(`[developer] No commit produced for ticket ${ticketId} on branch ${branch} — resetting ticket.`);
-      if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+      if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
       await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     } else {
       const [attempt] = await db
@@ -320,7 +325,7 @@ export const fixTicketOnBranch = traceable(_fixTicketOnBranch, {
 async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promise<BatchFixResult> {
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
   if (ticket?.jiraKey) {
-    await transitionTicket(ticket.jiraKey, "In Progress");
+    await tracker.transitionTicket(ticket.jiraKey, "In Progress");
   }
 
   const rawIssueIds = (ticket?.issueIds as string[]) ?? [];
@@ -330,7 +335,7 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
 
   if (ticketIssues.length === 0) {
     console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping.`);
-    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
   }
@@ -365,7 +370,7 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
 
   if (statusOut.trim().length === 0) {
     console.warn(`[developer] No file changes for ${jiraRef} — SDK agent did not modify any files.`);
-    if (ticket?.jiraKey) await transitionTicket(ticket.jiraKey, "To Do");
+    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
   }

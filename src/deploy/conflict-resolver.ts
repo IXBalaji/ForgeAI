@@ -8,14 +8,14 @@ import { db } from "../db/client.js";
 import { tickets, issues, fixAttempts } from "../db/schema.js";
 import { run } from "../lib/exec.js";
 import { gitRepoMutex } from "../lib/mutex.js";
+import { getVcsProvider } from "../integrations/vcs/factory.js";
 import { DEVELOPER_MODEL, DEVELOPER_EFFORT, DEVELOPER_MAX_TURNS, LABEL_PREFIX_SLUG } from "../lib/config.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN ?? "";
-const GITHUB_OWNER = process.env.GITHUB_OWNER ?? "";
-const GITHUB_REPO = process.env.GITHUB_REPO ?? "";
 const MAX_RETRIES = parseInt(process.env.CONFLICT_RESOLVER_MAX_RETRIES ?? "1", 10);
+
+const vcs = getVcsProvider();
 
 /**
  * Static, session-independent instructions — byte-identical across every
@@ -285,8 +285,8 @@ async function forcePushBranch(
   branch: string,
   worktreeDir: string,
 ): Promise<void> {
-  if (GITHUB_TOKEN && GITHUB_OWNER && GITHUB_REPO) {
-    const authRemote = `https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git`;
+  const authRemote = vcs.authenticatedRemoteUrl();
+  if (authRemote) {
     await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
   }
   await run(
@@ -400,6 +400,7 @@ async function runConflictAgent(prompt: string, worktreeDir: string, issueId?: s
         permissionMode: "acceptEdits",
         model: DEVELOPER_MODEL,
         effort: DEVELOPER_EFFORT,
+        thinking: { type: "disabled" },
         maxTurns: DEVELOPER_MAX_TURNS,
         systemPrompt: buildConflictSystemPrompt(QA_BRANCH),
       },
