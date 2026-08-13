@@ -375,8 +375,9 @@ program
 program
   .command("orchestrate")
   .description("Run the full autonomous LangGraph cycle: scan -> triage -> fix (one ticket at a time) -> review -> deploy -> next ticket -> release")
-  .action(async () => {
-    await runOrchestratorCycle();
+  .option("--cycle-id <id>", "reuse an existing iteration_cycles row instead of creating a new one")
+  .action(async (opts) => {
+    await runOrchestratorCycle(opts.cycleId);
   });
 
 program.parseAsync(process.argv);

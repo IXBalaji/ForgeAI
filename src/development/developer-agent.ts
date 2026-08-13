@@ -13,6 +13,7 @@ import { getVcsProvider } from "../integrations/vcs/factory.js";
 import { LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT, DEVELOPER_MAX_TURNS } from "../lib/config.js";
 import { buildSystemPrompt, buildUserPrompt } from "./prompt-builder.js";
 import { gitRepoMutex } from "../lib/mutex.js";
+import { categorize } from "../triage/categorize.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "qa";
@@ -141,9 +142,22 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
 
   // Early exit if the ticket has no resolvable issues — avoids wasting 5+ min on an empty SDK call
   const rawIssueIds = (ticket?.issueIds as string[]) ?? [];
-  const ticketIssues = rawIssueIds.length > 0
+  let ticketIssues = rawIssueIds.length > 0
     ? await db.select().from(issues).where(inArray(issues.id, rawIssueIds))
     : [];
+
+  if (ticketIssues.length === 0 && ticket?.category) {
+    console.warn(`[developer] Ticket ${ticketId} has no linked issues — searching by category "${ticket.category}"...`);
+    const allIssues = await db.select().from(issues).where(eq(issues.status, "ticketed"));
+    const matched = allIssues.filter((i) => categorize(i.wcagRule) === ticket.category);
+    if (matched.length > 0) {
+      console.log(`[developer] Found ${matched.length} issue(s) matching category "${ticket.category}" — linking to ticket.`);
+      const matchedIds = matched.map((i) => i.id);
+      await db.update(tickets).set({ issueIds: matchedIds }).where(eq(tickets.id, ticketId));
+      ticketIssues = matched;
+    }
+  }
+
   if (ticketIssues.length === 0) {
     console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping SDK agent.`);
     console.warn(`[developer]   ticket.issueIds (${rawIssueIds.length}): ${JSON.stringify(rawIssueIds)}`);
@@ -329,9 +343,21 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
   }
 
   const rawIssueIds = (ticket?.issueIds as string[]) ?? [];
-  const ticketIssues = rawIssueIds.length > 0
+  let ticketIssues = rawIssueIds.length > 0
     ? await db.select().from(issues).where(inArray(issues.id, rawIssueIds))
     : [];
+
+  if (ticketIssues.length === 0 && ticket?.category) {
+    console.warn(`[developer] Ticket ${ticketId} has no linked issues — searching by category "${ticket.category}"...`);
+    const allIssues = await db.select().from(issues).where(eq(issues.status, "ticketed"));
+    const matched = allIssues.filter((i) => categorize(i.wcagRule) === ticket.category);
+    if (matched.length > 0) {
+      console.log(`[developer] Found ${matched.length} issue(s) matching category "${ticket.category}" — linking to ticket.`);
+      const matchedIds = matched.map((i) => i.id);
+      await db.update(tickets).set({ issueIds: matchedIds }).where(eq(tickets.id, ticketId));
+      ticketIssues = matched;
+    }
+  }
 
   if (ticketIssues.length === 0) {
     console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping.`);

@@ -174,6 +174,10 @@ async function prepareBranchNode(state: typeof CycleState.State) {
   }
 
   console.log(`[orchestrate] Created branch ${branch} for ${openTickets.length} ticket(s): ${jiraKeys.join(", ") || ticketIds.map((id) => id.slice(0, 8)).join(", ")}`);
+  for (const t of openTickets) {
+    const issueCount = (t.issueIds as string[] | null)?.length ?? 0;
+    console.log(`[orchestrate]   ${t.jiraKey ?? t.id.slice(0, 8)} — category: "${t.category}", linked issues: ${issueCount}`);
+  }
   return { openTicketIds: ticketIds, fixedTicketIds: [], currentTicketIndex: 0, branch, worktreeDir };
 }
 
@@ -359,11 +363,11 @@ export function buildGraph() {
   return graph;
 }
 
-export async function runOrchestratorCycle(): Promise<void> {
-  return _runOrchestratorCycle();
+export async function runOrchestratorCycle(existingCycleId?: string): Promise<void> {
+  return _runOrchestratorCycle(existingCycleId);
 }
 
-async function _runOrchestratorCycle() {
+async function _runOrchestratorCycle(existingCycleId?: string) {
   const { initObservability } = await import("../integrations/observability.js");
   await initObservability();
 
@@ -372,10 +376,21 @@ async function _runOrchestratorCycle() {
 
   const compiled = buildGraph().compile({ checkpointer });
 
-  const [cycle] = await db
-    .insert(iterationCycles)
-    .values({ cycleNumber: 0, openIssueCount: 0 })
-    .returning();
+  // When a caller (e.g. the web app's start API route) has already inserted
+  // the iteration_cycles row so it can hand back the run id synchronously,
+  // reuse that row instead of creating a second one.
+  const cycle = existingCycleId
+    ? (await db.select().from(iterationCycles).where(eq(iterationCycles.id, existingCycleId)))[0]
+    : (
+        await db
+          .insert(iterationCycles)
+          .values({ cycleNumber: 0, openIssueCount: 0 })
+          .returning()
+      )[0];
+
+  if (!cycle) {
+    throw new Error(`No iteration_cycles row found for id ${existingCycleId}`);
+  }
 
   console.log(`[orchestrate] Starting pipeline — cycle ${cycle.id}`);
   console.log(`[orchestrate] Flow: scan → triage → prepareBranch → fix (all tickets) → push → review → deploy → release`);

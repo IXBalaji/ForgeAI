@@ -53,11 +53,18 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
     `${parkedTickets.length} parked, ${flaggedTickets.length} flagged.`;
 
   await notifySlack(summaryLine);
-  await sendEmail(
-    `[${LABEL_PREFIX}] Accessibility cycle ${cycleId} report`,
-    renderReleaseReportText(reportData),
-    renderReleaseReportHtml(reportData),
-  );
+
+  console.log(`[release] Sending email report for cycle ${cycleId}...`);
+  try {
+    await sendEmail(
+      `[${LABEL_PREFIX}] Accessibility cycle ${cycleId} report`,
+      renderReleaseReportText(reportData),
+      renderReleaseReportHtml(reportData),
+    );
+    console.log(`[release] Email report sent for cycle ${cycleId}.`);
+  } catch (err) {
+    console.error(`[release] Email report failed for cycle ${cycleId}:`, err instanceof Error ? err.message : err);
+  }
 
   return report;
 }
