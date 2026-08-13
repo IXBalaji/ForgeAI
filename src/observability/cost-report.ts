@@ -1,6 +1,5 @@
 import "dotenv/config";
 import { Client } from "langsmith";
-import { calculateCost, MODEL_PRICING } from "../lib/pricing.js";
 
 interface AgentUsage {
   agent: string;
@@ -8,7 +7,6 @@ interface AgentUsage {
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
-  cost: number;
   runCount: number;
 }
 
@@ -65,18 +63,12 @@ export async function generateCostReport(options: {
       ?? run.total_tokens
       ?? (inputTokens + outputTokens);
 
-    const metadataTotalCost = (metadata.total_cost as number) ?? 0;
-    const sdkCost = (metadata.sdk_total_cost_usd as number) ?? 0;
-    const computedCost = calculateCost(model, inputTokens, outputTokens);
-    const cost = metadataTotalCost > 0 ? metadataTotalCost : sdkCost > 0 ? sdkCost : computedCost;
-
     const key = `${agent}::${model}`;
     const existing = usageByKey.get(key);
     if (existing) {
       existing.inputTokens += inputTokens;
       existing.outputTokens += outputTokens;
       existing.totalTokens += totalTokens;
-      existing.cost += cost;
       existing.runCount += 1;
     } else {
       usageByKey.set(key, {
@@ -85,20 +77,20 @@ export async function generateCostReport(options: {
         inputTokens,
         outputTokens,
         totalTokens,
-        cost,
         runCount: 1,
       });
     }
   }
 
-  const rows = [...usageByKey.values()].sort((a, b) => b.cost - a.cost);
+  const rows = [...usageByKey.values()].sort((a, b) => b.totalTokens - a.totalTokens);
 
   const startStr = startTime.toISOString().split("T")[0];
   const endStr = endDate.toISOString().split("T")[0];
 
   console.log(`\n${"=".repeat(100)}`);
-  console.log(`  AI Token Usage & Cost Report`);
+  console.log(`  AI Token Usage Report`);
   console.log(`  Period: ${startStr} to ${endStr}  |  Project: ${projectName}`);
+  console.log(`  Cost breakdown is available in the LangSmith UI for this project.`);
   console.log(`${"=".repeat(100)}\n`);
 
   if (rows.length === 0) {
@@ -112,7 +104,6 @@ export async function generateCostReport(options: {
     "Runs".padStart(6),
     "Input Tokens".padStart(14),
     "Output Tokens".padStart(15),
-    "Cost ($)".padStart(10),
   ].join("  ");
 
   console.log(`  ${header}`);
@@ -120,13 +111,11 @@ export async function generateCostReport(options: {
 
   let totalInput = 0;
   let totalOutput = 0;
-  let totalCost = 0;
   let totalRuns = 0;
 
   for (const row of rows) {
     totalInput += row.inputTokens;
     totalOutput += row.outputTokens;
-    totalCost += row.cost;
     totalRuns += row.runCount;
 
     const line = [
@@ -135,7 +124,6 @@ export async function generateCostReport(options: {
       String(row.runCount).padStart(6),
       row.inputTokens.toLocaleString().padStart(14),
       row.outputTokens.toLocaleString().padStart(15),
-      `$${row.cost.toFixed(4)}`.padStart(10),
     ].join("  ");
     console.log(`  ${line}`);
   }
@@ -148,26 +136,22 @@ export async function generateCostReport(options: {
     String(totalRuns).padStart(6),
     totalInput.toLocaleString().padStart(14),
     totalOutput.toLocaleString().padStart(15),
-    `$${totalCost.toFixed(4)}`.padStart(10),
   ].join("  ");
   console.log(`  ${totalLine}`);
   console.log();
 
-  const byModel = new Map<string, { input: number; output: number; cost: number; runs: number }>();
+  const byModel = new Map<string, { input: number; output: number; runs: number }>();
   for (const row of rows) {
-    const m = byModel.get(row.model) ?? { input: 0, output: 0, cost: 0, runs: 0 };
+    const m = byModel.get(row.model) ?? { input: 0, output: 0, runs: 0 };
     m.input += row.inputTokens;
     m.output += row.outputTokens;
-    m.cost += row.cost;
     m.runs += row.runCount;
     byModel.set(row.model, m);
   }
 
   console.log(`  Model Summary:`);
   for (const [model, m] of byModel) {
-    const pricing = MODEL_PRICING[model];
-    const rateInfo = pricing ? ` (in: $${pricing.inputPerMToken}/M, out: $${pricing.outputPerMToken}/M)` : " (unknown pricing)";
-    console.log(`    ${model}${rateInfo}: ${m.runs} runs, ${m.input.toLocaleString()} in / ${m.output.toLocaleString()} out = $${m.cost.toFixed(4)}`);
+    console.log(`    ${model}: ${m.runs} runs, ${m.input.toLocaleString()} in / ${m.output.toLocaleString()} out`);
   }
   console.log();
 }

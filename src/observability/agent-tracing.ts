@@ -59,10 +59,6 @@ export async function runAgentTrace<T>(
         input_tokens: totals.input_tokens,
         output_tokens: totals.output_tokens,
         total_tokens: totals.total_tokens,
-        input_cost: totals.input_cost,
-        output_cost: totals.output_cost,
-        total_cost: totals.total_cost,
-        currency: "USD",
         models_used: models,
         api_calls: totals.anthropic_call_count,
       });
@@ -76,9 +72,6 @@ export async function runAgentTrace<T>(
           input_tokens: totals.input_tokens,
           output_tokens: totals.output_tokens,
           total_tokens: totals.total_tokens,
-          input_cost: totals.input_cost,
-          output_cost: totals.output_cost,
-          total_cost: totals.total_cost,
           models_used: models,
         },
       };

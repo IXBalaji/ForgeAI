@@ -41,7 +41,7 @@ export { PROJECT_KEY };
  * Override via env if a target project's fixes need Sonnet/Opus-level
  * reasoning; that's an explicit opt-in, not the default.
  */
-export const CLASSIFIER_MODEL = process.env.CLASSIFIER_MODEL ?? "claude-haiku-4-5-20251001";
+export const CLASSIFIER_MODEL = process.env.CLASSIFIER_MODEL ?? "claude-sonnet-4-5-20250929";
 export const DEVELOPER_MODEL = process.env.CLAUDE_DEVELOPER_MODEL ?? "claude-haiku-4-5-20251001";
 /**
  * "high" enables deep adaptive thinking, which is billed as output tokens —

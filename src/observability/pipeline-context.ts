@@ -22,10 +22,6 @@ export interface AnthropicUsageSnapshot {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
-  input_cost: number;
-  output_cost: number;
-  total_cost: number;
-  currency: "USD";
   status: "success" | "error";
   retry_attempt?: number;
   /** When false the call is visible in LangSmith but excluded from root totals. */
@@ -37,10 +33,6 @@ export interface AgentUsageTotals {
   input_tokens: number;
   output_tokens: number;
   total_tokens: number;
-  input_cost: number;
-  output_cost: number;
-  total_cost: number;
-  currency: "USD";
 }
 
 export interface PipelineRootSummary extends AgentUsageTotals {
@@ -53,10 +45,6 @@ const EMPTY_AGENT_TOTALS = (): AgentUsageTotals => ({
   input_tokens: 0,
   output_tokens: 0,
   total_tokens: 0,
-  input_cost: 0,
-  output_cost: 0,
-  total_cost: 0,
-  currency: "USD",
 });
 
 export class UsageAccumulator {
@@ -133,9 +121,6 @@ function addTotals(target: AgentUsageTotals, record: AnthropicUsageSnapshot): vo
   target.input_tokens += record.input_tokens;
   target.output_tokens += record.output_tokens;
   target.total_tokens += record.total_tokens;
-  target.input_cost += record.input_cost;
-  target.output_cost += record.output_cost;
-  target.total_cost += record.total_cost;
 }
 
 export interface PipelineContext {

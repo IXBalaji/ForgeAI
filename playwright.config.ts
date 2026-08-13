@@ -10,7 +10,7 @@ export default defineConfig({
     ["list"],
   ],
   use: {
-    baseURL: process.env.TARGET_FRONTEND_URL ?? "http://localhost:5173",
+    baseURL: process.env.TARGET_FRONTEND_URL ?? "https://ashy-desert-0ae520400.7.azurestaticapps.net",
     trace: "retain-on-failure",
   },
   projects: [

@@ -9,7 +9,6 @@ function isLangSmithTracingEnabled(): boolean {
 }
 import { getCurrentRunTree } from "langsmith/traceable";
 import type Anthropic from "@anthropic-ai/sdk";
-import { calculateCost } from "../lib/pricing.js";
 import { sanitizeForTrace } from "./sanitize.js";
 import {
   getPipelineContext,
@@ -65,40 +64,6 @@ function buildTraceMetadata(options: AnthropicTraceOptions): Record<string, unkn
   };
 }
 
-function splitSdkCosts(
-  modelName: string,
-  inputTokens: number,
-  outputTokens: number,
-  totalCostUsd?: number,
-  modelUsage?: SdkUsageResult["modelUsage"],
-): { input_cost: number; output_cost: number; total_cost: number } {
-  const modelBreakdown = modelUsage?.[modelName];
-  if (modelBreakdown?.costUSD != null && modelBreakdown.costUSD > 0) {
-    const total = modelBreakdown.costUSD;
-    const denom = inputTokens + outputTokens;
-    if (denom <= 0) return { input_cost: 0, output_cost: 0, total_cost: total };
-    const input_cost = total * (inputTokens / denom);
-    return { input_cost, output_cost: total - input_cost, total_cost: total };
-  }
-  if (totalCostUsd != null && totalCostUsd > 0) {
-    const input_cost = calculateCost(modelName, inputTokens, 0);
-    const output_cost = calculateCost(modelName, 0, outputTokens);
-    const computed = input_cost + output_cost;
-    if (computed > 0) {
-      const scale = totalCostUsd / computed;
-      return {
-        input_cost: input_cost * scale,
-        output_cost: output_cost * scale,
-        total_cost: totalCostUsd,
-      };
-    }
-    return { input_cost: 0, output_cost: 0, total_cost: totalCostUsd };
-  }
-  const input_cost = calculateCost(modelName, inputTokens, 0);
-  const output_cost = calculateCost(modelName, 0, outputTokens);
-  return { input_cost, output_cost, total_cost: input_cost + output_cost };
-}
-
 export function extractSdkTokenUsage(result: SdkUsageResult, fallbackModel: string): {
   model_name: string;
   input_tokens: number;
@@ -106,9 +71,6 @@ export function extractSdkTokenUsage(result: SdkUsageResult, fallbackModel: stri
   total_tokens: number;
   cache_read_tokens: number;
   cache_creation_tokens: number;
-  input_cost: number;
-  output_cost: number;
-  total_cost: number;
 } {
   const usage = result.usage;
   const modelNames = Object.keys(result.modelUsage ?? {});
@@ -118,14 +80,7 @@ export function extractSdkTokenUsage(result: SdkUsageResult, fallbackModel: stri
   const input_tokens = (usage?.input_tokens ?? 0) + cache_read_tokens + cache_creation_tokens;
   const output_tokens = usage?.output_tokens ?? 0;
   const total_tokens = input_tokens + output_tokens;
-  const costs = splitSdkCosts(
-    model_name,
-    input_tokens,
-    output_tokens,
-    result.total_cost_usd,
-    result.modelUsage,
-  );
-  return { model_name, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens, ...costs };
+  return { model_name, input_tokens, output_tokens, total_tokens, cache_read_tokens, cache_creation_tokens };
 }
 
 function attachRunUsage(
@@ -133,7 +88,6 @@ function attachRunUsage(
   modelName: string,
   inputTokens: number,
   outputTokens: number,
-  costs: { input_cost: number; output_cost: number; total_cost: number },
   status: "success" | "error",
   cacheTokens?: { cache_read_tokens: number; cache_creation_tokens: number },
 ): void {
@@ -152,10 +106,6 @@ function attachRunUsage(
       cache_read_input_tokens: cacheTokens?.cache_read_tokens ?? 0,
       cache_creation_input_tokens: cacheTokens?.cache_creation_tokens ?? 0,
       uncached_input_tokens: inputTokens - (cacheTokens?.cache_read_tokens ?? 0) - (cacheTokens?.cache_creation_tokens ?? 0),
-      input_cost: costs.input_cost,
-      output_cost: costs.output_cost,
-      total_cost: costs.total_cost,
-      currency: "USD",
       completion_status: status,
       ls_model_name: modelName,
       ls_provider: "anthropic",
@@ -173,7 +123,6 @@ async function postAnthropicRun(
     modelName: string;
     inputTokens: number;
     outputTokens: number;
-    costs: { input_cost: number; output_cost: number; total_cost: number };
     status: "success" | "error";
     cacheTokens?: { cache_read_tokens: number; cache_creation_tokens: number };
   },
@@ -191,10 +140,6 @@ async function postAnthropicRun(
       total_tokens: params.inputTokens + params.outputTokens,
       cache_read_input_tokens: params.cacheTokens?.cache_read_tokens ?? 0,
       cache_creation_input_tokens: params.cacheTokens?.cache_creation_tokens ?? 0,
-      input_cost: params.costs.input_cost,
-      output_cost: params.costs.output_cost,
-      total_cost: params.costs.total_cost,
-      currency: "USD",
       completion_status: params.status,
     }) as Record<string, unknown>;
     attachRunUsage(
@@ -202,7 +147,6 @@ async function postAnthropicRun(
       params.modelName,
       params.inputTokens,
       params.outputTokens,
-      params.costs,
       params.status,
       params.cacheTokens,
     );
@@ -223,10 +167,6 @@ async function postAnthropicRun(
       input_tokens: params.inputTokens,
       output_tokens: params.outputTokens,
       total_tokens: params.inputTokens + params.outputTokens,
-      input_cost: params.costs.input_cost,
-      output_cost: params.costs.output_cost,
-      total_cost: params.costs.total_cost,
-      currency: "USD",
       status: params.status,
       retry_attempt: options.retry_attempt,
       counts_toward_totals: true,
@@ -277,13 +217,6 @@ export async function traceAnthropicMessagesCreate<T extends Anthropic.Message>(
     const cache_creation_tokens = (response.usage as { cache_creation_input_tokens?: number }).cache_creation_input_tokens ?? 0;
     const inputTokens = response.usage.input_tokens + cache_read_tokens + cache_creation_tokens;
     const outputTokens = response.usage.output_tokens;
-    const input_cost = calculateCost(options.model_name, inputTokens, 0);
-    const output_cost = calculateCost(options.model_name, 0, outputTokens);
-    const costs = {
-      input_cost,
-      output_cost,
-      total_cost: input_cost + output_cost,
-    };
 
     await postAnthropicRun(runTree, options, {
       inputs: traceInputs,
@@ -296,7 +229,6 @@ export async function traceAnthropicMessagesCreate<T extends Anthropic.Message>(
       modelName: response.model || options.model_name,
       inputTokens,
       outputTokens,
-      costs,
       status: "success",
       cacheTokens: { cache_read_tokens, cache_creation_tokens },
     });
@@ -308,7 +240,6 @@ export async function traceAnthropicMessagesCreate<T extends Anthropic.Message>(
       modelName: options.model_name,
       inputTokens: 0,
       outputTokens: 0,
-      costs: { input_cost: 0, output_cost: 0, total_cost: 0 },
       status: "error",
     });
     throw err;
@@ -389,11 +320,6 @@ export async function traceAnthropicAgentSdkQuery(opts: AgentSdkQueryOptions): P
           modelName: usage.model_name,
           inputTokens: usage.input_tokens,
           outputTokens: usage.output_tokens,
-          costs: {
-            input_cost: usage.input_cost,
-            output_cost: usage.output_cost,
-            total_cost: usage.total_cost,
-          },
           status: "success",
           cacheTokens: {
             cache_read_tokens: usage.cache_read_tokens,
@@ -407,7 +333,6 @@ export async function traceAnthropicAgentSdkQuery(opts: AgentSdkQueryOptions): P
           modelName: opts.model_name,
           inputTokens: 0,
           outputTokens: 0,
-          costs: { input_cost: 0, output_cost: 0, total_cost: 0 },
           status: "success",
         });
       }
@@ -428,7 +353,6 @@ export async function traceAnthropicAgentSdkQuery(opts: AgentSdkQueryOptions): P
         modelName: opts.model_name,
         inputTokens: 0,
         outputTokens: 0,
-        costs: { input_cost: 0, output_cost: 0, total_cost: 0 },
         status: "error",
       });
 
@@ -462,10 +386,6 @@ export function attachPipelineRootSummary(runTree: RunTree): void {
         input_tokens: summary.input_tokens,
         output_tokens: summary.output_tokens,
         total_tokens: summary.total_tokens,
-        input_cost: summary.input_cost,
-        output_cost: summary.output_cost,
-        total_cost: summary.total_cost,
-        currency: summary.currency,
         models_used: summary.models_used,
         usage_by_agent: summary.usage_by_agent,
       },
