@@ -127,7 +127,7 @@ export default function AboutPage() {
             Web accessibility violations affect over 1 billion people worldwide.
             Manual remediation is slow, expensive, and hard to maintain across
             fast-moving codebases. Most teams fall behind on compliance — not
-            because they don't care, but because the volume of work overwhelms
+            because they do not care, but because the volume of work overwhelms
             available developer time.
           </p>
         </div>
@@ -136,7 +136,7 @@ export default function AboutPage() {
           <p>
             ForgeAI replaces manual triage-fix-review cycles with an autonomous
             pipeline. AI agents scan your application, create tickets for every
-            violation, write targeted code fixes, review each other's work, and
+            violation, write targeted code fixes, review each other&apos;s work, and
             deploy approved changes — all in a single automated run.
           </p>
         </div>
