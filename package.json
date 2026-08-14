@@ -7,6 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsx src/cli/index.ts",
+    "start": "next start -p 3000",
     "scan": "node -e \"const { spawn } = require('node:child_process'); if (process.platform === 'win32') { const child = spawn('cmd', ['/c', 'start', '', '/b', 'pnpm', 'run', 'test:a11y:headed'], { detached: true, stdio: 'ignore', windowsHide: true }); child.unref(); } else { const child = spawn('sh', ['-lc', 'pnpm run test:a11y:headed >/dev/null 2>&1 &'], { detached: true, stdio: 'ignore' }); child.unref(); } console.log('Accessibility scan started in background.');\"",
     "scan:agent": "tsx src/cli/index.ts scan",
     "scan:playwright": "playwright test && node src/scan/scripts/generate-a11y-report.mjs",
@@ -26,7 +27,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "test": "vitest run",
-    "test:a11y": "playwright test --headed --workers=1 && npm run report:a11y",
+    "test:a11y": "playwright test && npm run report:a11y",
     "test:a11y:headed": "playwright test --headed --workers=1 && npm run report:a11y",
     "test:a11y:headless": "playwright test && npm run report:a11y",
     "report:a11y": "node src/scan/scripts/generate-a11y-report.mjs"

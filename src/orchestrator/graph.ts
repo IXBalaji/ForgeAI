@@ -103,9 +103,9 @@ async function scanNode(state: typeof CycleState.State) {
       console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
       await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
     }
-    console.log("[orchestrate] Running Playwright + axe scan via test:a11y:headed...");
+    console.log("[orchestrate] Running Playwright + axe scan via headless test:a11y...");
     try {
-      await run("npx", ["playwright", "test", "--headed", "--workers=1"], PROJECT_ROOT);
+      await run("npx", ["playwright", "test", "--workers=1"], PROJECT_ROOT);
     } catch (err) {
       console.warn("[orchestrate] Some Playwright tests may have failed — continuing with available reports.", (err as Error).message.slice(0, 300));
     }
