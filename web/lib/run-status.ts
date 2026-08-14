@@ -1,4 +1,4 @@
-import { db } from "./db";
+import { db, requireDb } from "./db";
 import { iterationCycles, tickets, fixAttempts, reviewResults, deployments } from "./schema";
 import { eq, gte, and, inArray } from "drizzle-orm";
 import type { RunStatus, Stage } from "./types";
@@ -20,7 +20,8 @@ export async function deriveRunStatus(
   processAlive: boolean,
   exitCode: number | null,
 ): Promise<RunStatus> {
-  const [cycle] = await db.select().from(iterationCycles).where(eq(iterationCycles.id, cycleId));
+  const database = requireDb();
+  const [cycle] = await database.select().from(iterationCycles).where(eq(iterationCycles.id, cycleId));
 
   if (!cycle) {
     throw new Error(`No iteration_cycles row found for ${cycleId}`);
@@ -31,7 +32,7 @@ export async function deriveRunStatus(
 
   // If the cycle is complete, surface the results
   if (endedAt) {
-    const allTickets = await db
+    const allTickets = await database
       .select()
       .from(tickets)
       .where(gte(tickets.createdAt, cycle.startedAt));
@@ -51,7 +52,7 @@ export async function deriveRunStatus(
       stage: "release",
       stageDetail: null,
       loopIterationHint: null,
-      counts: await deriveCounts(cycle.startedAt),
+      counts: await deriveCounts(cycle.startedAt, database),
       recentLog: logLines.slice(-20),
       processAlive,
       failed: exitCode !== null && exitCode !== 0,
@@ -67,7 +68,7 @@ export async function deriveRunStatus(
   }
 
   // Still running — derive coarse stage from DB rows + log patterns
-  const stage = await deriveStageFromDB(cycle.startedAt, logLines);
+  const stage = await deriveStageFromDB(cycle.startedAt, logLines, database);
   const stageDetail = parseStageDetailFromLog(logLines);
   const loopIterationHint = parseLoopIterationFromLog(logLines);
   const logsByStage = filterLogsByStage(logLines);
@@ -79,7 +80,7 @@ export async function deriveRunStatus(
     stage,
     stageDetail,
     loopIterationHint,
-    counts: await deriveCounts(cycle.startedAt),
+    counts: await deriveCounts(cycle.startedAt, database),
     recentLog: logLines.slice(-20),
     processAlive,
     failed: !processAlive && endedAt === null,
@@ -89,10 +90,10 @@ export async function deriveRunStatus(
   };
 }
 
-async function deriveStageFromDB(startedAt: Date, logLines: string[]): Promise<Stage> {
+async function deriveStageFromDB(startedAt: Date, logLines: string[], database: NonNullable<typeof db>): Promise<Stage> {
   const logStage = inferStageFromLog(logLines);
 
-  const ticketsCount = await db
+  const ticketsCount = await database
     .select()
     .from(tickets)
     .where(gte(tickets.createdAt, startedAt));
@@ -101,7 +102,7 @@ async function deriveStageFromDB(startedAt: Date, logLines: string[]): Promise<S
     return logStage ?? "scan";
   }
 
-  const attemptsCount = await db
+  const attemptsCount = await database
     .select()
     .from(fixAttempts)
     .where(
@@ -122,7 +123,7 @@ async function deriveStageFromDB(startedAt: Date, logLines: string[]): Promise<S
     return logStage ?? "triage";
   }
 
-  const reviewsCount = await db
+  const reviewsCount = await database
     .select()
     .from(reviewResults)
     .where(
@@ -142,7 +143,7 @@ async function deriveStageFromDB(startedAt: Date, logLines: string[]): Promise<S
     return "fix";
   }
 
-  const deploymentsCount = await db.select().from(deployments).where(gte(deployments.deployedAt, startedAt));
+  const deploymentsCount = await database.select().from(deployments).where(gte(deployments.deployedAt, startedAt));
 
   if (deploymentsCount.length === 0) {
     if (logStage && stageOrder(logStage) > stageOrder("review")) {
@@ -162,10 +163,10 @@ function stageOrder(stage: Stage): number {
   return STAGE_ORDER[stage] ?? -1;
 }
 
-async function deriveCounts(startedAt: Date) {
-  const allTickets = await db.select().from(tickets).where(gte(tickets.createdAt, startedAt));
+async function deriveCounts(startedAt: Date, database: NonNullable<typeof db>) {
+  const allTickets = await database.select().from(tickets).where(gte(tickets.createdAt, startedAt));
 
-  const allAttempts = await db
+  const allAttempts = await database
     .select()
     .from(fixAttempts)
     .where(
@@ -178,7 +179,7 @@ async function deriveCounts(startedAt: Date) {
       ),
     );
 
-  const allReviews = await db
+  const allReviews = await database
     .select()
     .from(reviewResults)
     .where(
@@ -191,7 +192,7 @@ async function deriveCounts(startedAt: Date) {
       ),
     );
 
-  const allDeployments = await db.select().from(deployments).where(gte(deployments.deployedAt, startedAt));
+  const allDeployments = await database.select().from(deployments).where(gte(deployments.deployedAt, startedAt));
 
   return {
     ticketsOpen: allTickets.filter((t) => t.status === "open").length,

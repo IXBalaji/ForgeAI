@@ -14,7 +14,7 @@
  */
 
 import { NextResponse } from "next/server";
-import { db } from "@/lib/db";
+import { db, requireDb } from "@/lib/db";
 import { iterationCycles } from "@/lib/schema";
 import { eq, isNull } from "drizzle-orm";
 import { getActiveRun, clearActiveRun } from "@/lib/run-registry";
@@ -22,6 +22,14 @@ import { spawnOrchestrator, spawnTestCommand } from "@/lib/process-runner";
 import type { StartResponse, ConflictResponse } from "@/lib/types";
 
 export async function POST(request: Request) {
+  if (!db) {
+    return NextResponse.json(
+      { error: "DATABASE_URL is required in the root .env file" },
+      { status: 503 },
+    );
+  }
+
+  const database = requireDb();
   // Check for an existing active run (lock file)
   const activeRun = await getActiveRun();
 
@@ -42,14 +50,14 @@ export async function POST(request: Request) {
       `[start] Auto-recovering stalled run: cycleId=${activeRun.cycleId}`,
     );
     await clearActiveRun(activeRun.cycleId);
-    await db
+    await database
       .update(iterationCycles)
       .set({ endedAt: new Date() })
       .where(eq(iterationCycles.id, activeRun.cycleId));
   }
 
   // Check for orphaned DB rows (ended_at IS NULL but no live process)
-  const [existingCycle] = await db
+  const [existingCycle] = await database
     .select()
     .from(iterationCycles)
     .where(isNull(iterationCycles.endedAt))
@@ -67,7 +75,7 @@ export async function POST(request: Request) {
   }
 
   // Pre-insert the iteration_cycles row
-  const [cycle] = await db
+  const [cycle] = await database
     .insert(iterationCycles)
     .values({
       cycleNumber: 0,
@@ -97,7 +105,7 @@ export async function POST(request: Request) {
   } catch (err: unknown) {
     console.error("[start] Failed to spawn orchestrator:", err);
     // Clean up the pre-inserted cycle row so it doesn't become an orphan
-    await db
+    await database
       .update(iterationCycles)
       .set({ endedAt: new Date() })
       .where(eq(iterationCycles.id, cycle.id));
