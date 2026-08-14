@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 import { Hero } from "@/components/hero";
 import { StartWorkflowButton } from "@/components/start-workflow-button";
 import { StageTimeline } from "@/components/stage-timeline";
-import { ActivityLog } from "@/components/activity-log";
 import { ResultsSummary } from "@/components/results-summary";
 import { ErrorPanel } from "@/components/error-panel";
 import type { RunStatus } from "@/lib/types";
