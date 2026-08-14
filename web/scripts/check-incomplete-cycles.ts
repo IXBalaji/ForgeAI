@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-config({ path: resolve(__dirname, "../.env.local") });
+config({ path: resolve(__dirname, "../../.env") });
 
 import { db } from "../lib/db";
 import { iterationCycles } from "../lib/schema";

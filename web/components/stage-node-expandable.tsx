@@ -54,11 +54,6 @@ export function StageNodeExpandable({ stage, status, logs }: StageNodeExpandable
         <span className="stage-node__label">
           {STAGE_LABELS[stage]}
         </span>
-        {logs.length > 0 && (
-          <span className="stage-node__badge">
-            {logs.length} {logs.length === 1 ? "line" : "lines"}
-          </span>
-        )}
         <span className="stage-node__chevron" aria-hidden="true">
           {"▶"}
         </span>

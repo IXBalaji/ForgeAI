@@ -51,12 +51,12 @@ export function ConfirmationDialog({
 
   if (!isOpen) return null;
 
-  const targetUrl = process.env.NEXT_PUBLIC_TARGET_FRONTEND_URL || "[not configured]";
-  const githubRepo = process.env.NEXT_PUBLIC_GITHUB_OWNER && process.env.NEXT_PUBLIC_GITHUB_REPO
-    ? `${process.env.NEXT_PUBLIC_GITHUB_OWNER}/${process.env.NEXT_PUBLIC_GITHUB_REPO}`
+  const targetUrl = process.env.TARGET_FRONTEND_URL || "[not configured]";
+  const githubRepo = process.env.GITHUB_OWNER && process.env.GITHUB_REPO
+    ? `${process.env.GITHUB_OWNER}/${process.env.GITHUB_REPO}`
     : "[not configured]";
-  const qaBranch = process.env.NEXT_PUBLIC_GITHUB_QA_BRANCH || "[not configured]";
-  const projectKey = process.env.NEXT_PUBLIC_PROJECT_KEY || "[not configured]";
+  const qaBranch = process.env.GITHUB_QA_BRANCH || "[not configured]";
+  const projectKey = process.env.PROJECT_KEY || "[not configured]";
 
   return (
     <dialog

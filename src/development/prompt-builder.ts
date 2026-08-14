@@ -78,7 +78,7 @@ export async function buildUserPrompt(ticketId: string): Promise<string> {
 
   // Enrich findings with HTML snippets and fix suggestions from the scan reports
   // so the SDK agent knows exactly what DOM element to target in source code.
-  const reportData = loadReportDataForIssues(ticketIssues);
+  const reportData = loadReportDataForIssues();
 
   const findings = ticketIssues
     .map((i) => {
@@ -120,9 +120,7 @@ export async function buildUserPrompt(ticketId: string): Promise<string> {
     .join("\n");
 }
 
-function loadReportDataForIssues(
-  ticketIssues: Array<{ wcagRule: string; selector: string; pageUrl: string }>,
-): Map<string, { html: string; failureSummary: string | null }> {
+function loadReportDataForIssues(): Map<string, { html: string; failureSummary: string | null }> {
   const result = new Map<string, { html: string; failureSummary: string | null }>();
   try {
     if (!existsSync(REPORT_DIR)) return result;

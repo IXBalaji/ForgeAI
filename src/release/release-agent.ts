@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { inArray, and, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { tickets, iterationCycles } from "../db/schema.js";
 import { notifySlack } from "../lib/notify.js";

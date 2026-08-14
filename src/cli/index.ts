@@ -4,7 +4,7 @@ import { Command } from "commander";
 import { runScannerAgent, type AuthRole } from "../scan/scanner-agent.js";
 import { runTriageAgent } from "../triage/triage-agent.js";
 import { triageFromReports } from "../triage/triage-from-reports.js";
-import { runDeveloperAgent, fixTicketOnBranch, type DeveloperResult, type BatchFixResult } from "../development/developer-agent.js";
+import { runDeveloperAgent, fixTicketOnBranch, type BatchFixResult } from "../development/developer-agent.js";
 import { runReviewerAgent, reviewBranch, type ReviewerVerdict, type BranchReviewVerdict } from "../review/reviewer-agent.js";
 import { runDeployAgent, deployBranch, type DeployResult, type BranchDeployResult } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
@@ -282,8 +282,8 @@ program
   .description("Re-review all existing fix attempts that have PRs and deploy approved ones (skips developer agent)")
   .option("--limit <n>", "max attempts to process", "10")
   .action(async (opts) => {
-    const { eq, isNotNull, sql } = await import("drizzle-orm");
-    const { fixAttempts, tickets } = await import("../db/schema.js");
+    const { isNotNull } = await import("drizzle-orm");
+    const { fixAttempts } = await import("../db/schema.js");
     const attempts = await db
       .select()
       .from(fixAttempts)

@@ -15,7 +15,6 @@ import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
-const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "qa";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 
 const tracker = getTrackerProvider();

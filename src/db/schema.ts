@@ -46,7 +46,7 @@ export const tickets = pgTable("tickets", {
   epicKey: text("epic_key"),
   category: text("category").notNull(),
   issueIds: jsonb("issue_ids").notNull().default([]),
-  status: text("status").notNull().default("open"), // open | in_review | parked | flagged | done
+  status: text("status").notNull().default("open"), // open | in_progress | in_review | parked | flagged | done
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { defineConfig, devices } from "@playwright/test";
 
 export default defineConfig({
@@ -10,7 +11,7 @@ export default defineConfig({
     ["list"],
   ],
   use: {
-    baseURL: process.env.TARGET_FRONTEND_URL ?? "https://ashy-desert-0ae520400.7.azurestaticapps.net",
+    baseURL: process.env.TARGET_FRONTEND_URL ?? "http://localhost:5173",
     trace: "retain-on-failure",
   },
   projects: [

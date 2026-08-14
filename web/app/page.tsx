@@ -183,6 +183,10 @@ export default function Home() {
             <div className="stat-label">Open</div>
           </div>
           <div className="stat">
+            <div className="stat-value">{status.counts.ticketsInProgress}</div>
+            <div className="stat-label">In Progress</div>
+          </div>
+          <div className="stat">
             <div className="stat-value">{status.counts.ticketsInReview}</div>
             <div className="stat-label">In Review</div>
           </div>
@@ -203,7 +207,6 @@ export default function Home() {
             <div className="stat-label">Deployments</div>
           </div>
         </div>
-        <ActivityLog lines={status.recentLog} />
       </main>
     );
   }
@@ -223,6 +226,10 @@ export default function Home() {
           <div className="stat">
             <div className="stat-value">{status.counts.ticketsOpen}</div>
             <div className="stat-label">Open</div>
+          </div>
+          <div className="stat">
+            <div className="stat-value">{status.counts.ticketsInProgress}</div>
+            <div className="stat-label">In Progress</div>
           </div>
           <div className="stat">
             <div className="stat-value">{status.counts.ticketsInReview}</div>
@@ -246,7 +253,6 @@ export default function Home() {
           </div>
         </div>
         <ResultsSummary status={status} onStartAnother={handleStartAnother} />
-        <ActivityLog lines={status.recentLog} />
       </main>
     );
   }

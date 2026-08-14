@@ -18,6 +18,7 @@ export interface RunStatus {
   loopIterationHint: number | null;
   counts: {
     ticketsOpen: number;
+    ticketsInProgress: number;
     ticketsInReview: number;
     ticketsParked: number;
     ticketsFlagged: number;

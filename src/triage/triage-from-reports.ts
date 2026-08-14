@@ -2,7 +2,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { readReportDir, aggregateByRule } from "./report-reader.js";
 import { classifyIssues } from "./issue-classifier.js";
-import { buildTicketPayloads, type JiraTicketPayload } from "./ticket-builder.js";
+import { buildTicketPayloads } from "./ticket-builder.js";
 import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { LABEL_PREFIX } from "../lib/config.js";
 

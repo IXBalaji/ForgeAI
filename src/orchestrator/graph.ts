@@ -81,6 +81,10 @@ const CycleState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => 0,
   }),
+  triageFoundIssues: Annotation<boolean>({
+    reducer: (_prev, next) => next,
+    default: () => false,
+  }),
   freshScan: Annotation<boolean>({
     reducer: (_prev, next) => next,
     default: () => true,
@@ -99,9 +103,9 @@ async function scanNode(state: typeof CycleState.State) {
       console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
       await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
     }
-    console.log("[orchestrate] Running Playwright + axe scan...");
+    console.log("[orchestrate] Running Playwright + axe scan via test:a11y:headed...");
     try {
-      await run("npx", ["playwright", "test"], PROJECT_ROOT);
+      await run("npx", ["playwright", "test", "--headed", "--workers=1"], PROJECT_ROOT);
     } catch (err) {
       console.warn("[orchestrate] Some Playwright tests may have failed — continuing with available reports.", (err as Error).message.slice(0, 300));
     }
@@ -121,14 +125,19 @@ async function triageNode(state: typeof CycleState.State) {
     console.log("[orchestrate] Running triage from reports...");
     const epicKey = state.epicKey ?? (await tracker.ensureEpic(state.cycleId));
     const result = await triageFromReports({ cycleId: state.cycleId });
+    const triageFoundIssues = result.summary.totalViolationTypes > 0;
     console.log(`[orchestrate] Triage complete: ${result.dbSync.ticketsCreated} ticket(s) created, ${result.summary.totalViolationTypes} violation type(s).`);
-    return { epicKey };
+    return { epicKey, triageFoundIssues };
   });
 }
 
-function routeAfterTriage(state: typeof CycleState.State) {
+export function routeAfterTriage(state: typeof CycleState.State) {
   if (state.cycleNumber >= MAX_CYCLES) {
     console.log(`[orchestrate] Max cycles reached — moving to release.`);
+    return "release";
+  }
+  if (!state.triageFoundIssues) {
+    console.log("[orchestrate] Triage found no actionable issues — moving to release.");
     return "release";
   }
   return "prepareBranch";
@@ -178,6 +187,18 @@ async function prepareBranchNode(state: typeof CycleState.State) {
     const issueCount = (t.issueIds as string[] | null)?.length ?? 0;
     console.log(`[orchestrate]   ${t.jiraKey ?? t.id.slice(0, 8)} — category: "${t.category}", linked issues: ${issueCount}`);
   }
+
+  await db.update(tickets).set({ status: "in_progress" }).where(inArray(tickets.id, ticketIds));
+  for (const t of openTickets) {
+    if (t.jiraKey) {
+      try {
+        await tracker.transitionTicket(t.jiraKey, "In Progress");
+      } catch (err) {
+        console.warn(`[orchestrate] Failed to transition ${t.jiraKey} to In Progress:`, (err as Error).message?.slice(0, 200));
+      }
+    }
+  }
+
   return { openTicketIds: ticketIds, fixedTicketIds: [], currentTicketIndex: 0, branch, worktreeDir };
 }
 
@@ -200,7 +221,19 @@ async function fixNextNode(state: typeof CycleState.State) {
 
   return runAgentTrace("developer", async () => {
     console.log(`[orchestrate] Fixing ticket ${current}/${total}: ${ticketId.slice(0, 8)}...`);
-    const result: BatchFixResult = await fixTicketOnBranch(ticketId, state.worktreeDir!);
+
+    let result: BatchFixResult;
+    try {
+      result = await fixTicketOnBranch(ticketId, state.worktreeDir!);
+    } catch (err) {
+      console.error(`[orchestrate] ✗ ticket ${ticketId.slice(0, 8)} threw an error — skipping.`, (err as Error).message?.slice(0, 300));
+      await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+      try {
+        const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+        if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
+      } catch { /* best-effort Jira rollback */ }
+      return { currentTicketIndex: state.currentTicketIndex + 1 };
+    }
 
     const newFixed = result.commitSha
       ? [...state.fixedTicketIds, ticketId]
@@ -227,18 +260,33 @@ function routeAfterFix(state: typeof CycleState.State) {
   return "pushBranch";
 }
 
+const PUSH_MAX_RETRIES = 3;
+const PUSH_RETRY_DELAY_MS = 3000;
+
 // git push only, no model call — not wrapped in runAgentTrace.
 async function pushBranchNode(state: typeof CycleState.State) {
-  const releaseLock = await gitRepoMutex.acquire();
-  try {
-    const authRemote = vcs.authenticatedRemoteUrl();
-    if (authRemote) {
-      await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
+  const authRemote = vcs.authenticatedRemoteUrl();
+
+  for (let attempt = 1; attempt <= PUSH_MAX_RETRIES; attempt++) {
+    const releaseLock = await gitRepoMutex.acquire();
+    try {
+      if (authRemote) {
+        await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
+      }
+      await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
+      console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
+      return {};
+    } catch (err) {
+      if (attempt < PUSH_MAX_RETRIES) {
+        console.warn(`[orchestrate] Push attempt ${attempt}/${PUSH_MAX_RETRIES} failed, retrying in ${PUSH_RETRY_DELAY_MS / 1000}s...`, (err as Error).message?.slice(0, 200));
+      } else {
+        console.error(`[orchestrate] Push failed after ${PUSH_MAX_RETRIES} attempts for branch ${state.branch}.`, (err as Error).message?.slice(0, 300));
+        throw err;
+      }
+    } finally {
+      releaseLock();
     }
-    await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
-    console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
-  } finally {
-    releaseLock();
+    await new Promise((r) => setTimeout(r, PUSH_RETRY_DELAY_MS));
   }
   return {};
 }
@@ -267,19 +315,36 @@ function routeAfterReview(state: typeof CycleState.State) {
 async function autofixNode(state: typeof CycleState.State) {
   return runAgentTrace("autofix", async () => {
     console.log(`[orchestrate] Autofixing build errors (retry ${state.retryCount + 1}/${MAX_REVIEW_RETRIES})...`);
-    const commitSha = await fixBuildErrors(state.worktreeDir!, state.reviewComments ?? "Build failed");
+
+    let commitSha: string | null = null;
+    try {
+      commitSha = await fixBuildErrors(state.worktreeDir!, state.reviewComments ?? "Build failed");
+    } catch (err) {
+      console.error(`[orchestrate] Autofix agent failed:`, (err as Error).message?.slice(0, 300));
+      return { retryCount: state.retryCount + 1 };
+    }
 
     if (commitSha) {
       console.log(`[orchestrate] Autofix committed: ${commitSha.slice(0, 7)} — re-pushing...`);
-      const releaseLock = await gitRepoMutex.acquire();
-      try {
-        const authRemote = vcs.authenticatedRemoteUrl();
-        if (authRemote) {
-          await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
+      for (let attempt = 1; attempt <= PUSH_MAX_RETRIES; attempt++) {
+        const releaseLock = await gitRepoMutex.acquire();
+        try {
+          const authRemote = vcs.authenticatedRemoteUrl();
+          if (authRemote) {
+            await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
+          }
+          await run("git", ["-c", "credential.helper=", "push", "origin", state.branch!], state.worktreeDir!);
+          break;
+        } catch (err) {
+          if (attempt < PUSH_MAX_RETRIES) {
+            console.warn(`[orchestrate] Autofix push attempt ${attempt}/${PUSH_MAX_RETRIES} failed, retrying...`, (err as Error).message?.slice(0, 200));
+          } else {
+            console.error(`[orchestrate] Autofix push failed after ${PUSH_MAX_RETRIES} attempts.`);
+          }
+        } finally {
+          releaseLock();
         }
-        await run("git", ["-c", "credential.helper=", "push", "origin", state.branch!], state.worktreeDir!);
-      } finally {
-        releaseLock();
+        await new Promise((r) => setTimeout(r, PUSH_RETRY_DELAY_MS));
       }
     } else {
       console.warn(`[orchestrate] Autofix made no changes.`);
@@ -292,22 +357,51 @@ async function autofixNode(state: typeof CycleState.State) {
 async function deployNode(state: typeof CycleState.State) {
   return runAgentTrace("deploy", async () => {
     console.log(`[orchestrate] Deploying branch ${state.branch}...`);
-    const result = await deployBranch(state.branch!, state.fixedTicketIds);
-    console.log(`[orchestrate] Deploy complete — ${result.ticketsDeployed} ticket(s) merged.`);
+    try {
+      const result = await deployBranch(state.branch!, state.fixedTicketIds);
+      console.log(`[orchestrate] Deploy complete — ${result.ticketsDeployed} ticket(s) merged.`);
+    } catch (err) {
+      console.error(`[orchestrate] Deploy failed for branch ${state.branch}:`, (err as Error).message?.slice(0, 300));
+      for (const ticketId of state.fixedTicketIds) {
+        await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
+      }
+    }
     return { freshScan: false };
   });
 }
 
+const WORKTREE_REMOVE_RETRIES = 3;
+const WORKTREE_RETRY_DELAY_MS = 2000;
+
+async function removeWorktreeWithRetry(worktreeDir: string, branch: string | null) {
+  for (let attempt = 1; attempt <= WORKTREE_REMOVE_RETRIES; attempt++) {
+    const releaseLock = await gitRepoMutex.acquire();
+    try {
+      await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH);
+      console.log(`[orchestrate] Removed worktree at ${worktreeDir}.`);
+      if (branch) {
+        try {
+          await run("git", ["branch", "-D", branch], TARGET_REPO_PATH);
+        } catch { /* branch may already be gone */ }
+      }
+      return;
+    } catch (err) {
+      if (attempt < WORKTREE_REMOVE_RETRIES) {
+        console.warn(`[orchestrate] Worktree removal attempt ${attempt}/${WORKTREE_REMOVE_RETRIES} failed, retrying in ${WORKTREE_RETRY_DELAY_MS / 1000}s...`, (err as Error).message?.slice(0, 200));
+      } else {
+        console.error(`[orchestrate] Could not remove worktree at ${worktreeDir} after ${WORKTREE_REMOVE_RETRIES} attempts.`);
+      }
+    } finally {
+      releaseLock();
+    }
+    await new Promise((r) => setTimeout(r, WORKTREE_RETRY_DELAY_MS));
+  }
+}
+
 // Worktree/DB cleanup only, no model call — not wrapped in runAgentTrace.
 async function cleanupNode(state: typeof CycleState.State) {
-  if (!state.worktreeDir) return {};
-  const releaseLock = await gitRepoMutex.acquire();
-  try {
-    await run("git", ["worktree", "remove", "--force", state.worktreeDir], TARGET_REPO_PATH);
-  } catch {
-    console.warn(`[orchestrate] Could not remove worktree at ${state.worktreeDir}.`);
-  } finally {
-    releaseLock();
+  if (state.worktreeDir) {
+    await removeWorktreeWithRetry(state.worktreeDir, state.branch);
   }
 
   // Reset unfixed tickets back to open
@@ -317,10 +411,17 @@ async function cleanupNode(state: typeof CycleState.State) {
     }
   }
 
+  // Reset any tickets still stuck in in_progress (e.g. agent crashed mid-fix)
+  if (state.openTicketIds.length > 0) {
+    await db.update(tickets).set({ status: "open" }).where(
+      and(eq(tickets.status, "in_progress"), inArray(tickets.id, state.openTicketIds)),
+    );
+  }
+
   return { branch: null, worktreeDir: null, openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0 };
 }
 
-function routeAfterCleanup(state: typeof CycleState.State) {
+function routeAfterCleanup() {
   return "scan";
 }
 
@@ -410,6 +511,7 @@ async function _runOrchestratorCycle(existingCycleId?: string) {
           reviewVerdict: null,
           reviewComments: null,
           retryCount: 0,
+          triageFoundIssues: false,
           freshScan: true,
         },
         {

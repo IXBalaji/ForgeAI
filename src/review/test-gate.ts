@@ -66,7 +66,7 @@ export async function testGate(worktreeDir: string, touchedFiles: string[]): Pro
 
     // Test check
     try {
-      const { stdout, stderr } = await run("npm", ["test", "--if-present", "--silent"], wsDir);
+      await run("npm", ["test", "--if-present", "--silent"], wsDir);
       outputs.push(`[${ws}:test] passed`);
     } catch (err: any) {
       const message: string = err.message ?? "";

@@ -195,6 +195,7 @@ async function deriveCounts(startedAt: Date) {
 
   return {
     ticketsOpen: allTickets.filter((t) => t.status === "open").length,
+    ticketsInProgress: allTickets.filter((t) => t.status === "in_progress").length,
     ticketsInReview: allTickets.filter((t) => t.status === "in_review").length,
     ticketsParked: allTickets.filter((t) => t.status === "parked").length,
     ticketsFlagged: allTickets.filter((t) => t.status === "flagged").length,

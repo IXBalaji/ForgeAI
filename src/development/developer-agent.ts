@@ -16,7 +16,6 @@ import { gitRepoMutex } from "../lib/mutex.js";
 import { categorize } from "../triage/categorize.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
-const BASE_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "qa";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 const MAX_RETRIES = parseInt(process.env.DEVELOPER_MAX_RETRIES ?? "1", 10);
 
@@ -116,9 +115,6 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   if (!TARGET_REPO_PATH) throw new Error("TARGET_REPO_PATH is not set.");
 
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
-  if (ticket?.jiraKey) {
-    await tracker.transitionTicket(ticket.jiraKey, "In Progress");
-  }
 
   const existingAttempts = await db
     .select()
@@ -169,7 +165,9 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     } else {
       console.warn(`[developer]   ⚠ The ticket has an empty issueIds array — triage may not have linked any issues to it.`);
     }
-    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
+    try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (err) {
+      console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
+    }
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     const cleanupLock = await gitRepoMutex.acquire();
     try {
@@ -276,7 +274,9 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
           if (isLast) {
             pushStatus = "failed";
             console.error(`[developer] Push failed after ${PUSH_MAX_RETRIES} attempts for branch ${branch}.`, err);
-            if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
+            try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (jiraErr) {
+              console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (jiraErr as Error).message?.slice(0, 200));
+            }
             await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
             throw err;
           }
@@ -292,7 +292,9 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     // recovery logic retries it on the next cycle.
     if (!commitSha) {
       console.warn(`[developer] No commit produced for ticket ${ticketId} on branch ${branch} — resetting ticket.`);
-      if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
+      try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (err) {
+        console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
+      }
       await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     } else {
       const [attempt] = await db
@@ -338,9 +340,6 @@ export const fixTicketOnBranch = traceable(_fixTicketOnBranch, {
 
 async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promise<BatchFixResult> {
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
-  if (ticket?.jiraKey) {
-    await tracker.transitionTicket(ticket.jiraKey, "In Progress");
-  }
 
   const rawIssueIds = (ticket?.issueIds as string[]) ?? [];
   let ticketIssues = rawIssueIds.length > 0
@@ -361,7 +360,9 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
 
   if (ticketIssues.length === 0) {
     console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping.`);
-    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
+    try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (err) {
+      console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
+    }
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
   }
@@ -396,7 +397,9 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
 
   if (statusOut.trim().length === 0) {
     console.warn(`[developer] No file changes for ${jiraRef} — SDK agent did not modify any files.`);
-    if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do");
+    try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (err) {
+      console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
+    }
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
   }
