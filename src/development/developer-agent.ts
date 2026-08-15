@@ -13,6 +13,8 @@ import { getVcsProvider } from "../integrations/vcs/factory.js";
 import { LABEL_PREFIX_SLUG, DEVELOPER_MODEL, DEVELOPER_EFFORT, DEVELOPER_MAX_TURNS } from "../lib/config.js";
 import { buildSystemPrompt, buildUserPrompt } from "./prompt-builder.js";
 import { gitRepoMutex } from "../lib/mutex.js";
+import { ensureGitIdentity } from "../lib/git-identity.js";
+import { assertTargetRepoConfigured, ensureFreshQaBase } from "../lib/repo-config.js";
 import { categorize } from "../triage/categorize.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
@@ -112,8 +114,7 @@ export const runDeveloperAgent = traceable(_runDeveloperAgent, {
 });
 
 async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
-  if (!TARGET_REPO_PATH) throw new Error("TARGET_REPO_PATH is not set.");
-
+  const repoPath = assertTargetRepoConfigured();
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
 
   const existingAttempts = await db
@@ -130,7 +131,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   // Serialize git worktree creation — git holds a repo-level lock
   let releaseLock = await gitRepoMutex.acquire();
   try {
-    await run("git", ["fetch", "origin", QA_BRANCH], TARGET_REPO_PATH);
+    await ensureFreshQaBase(repoPath);
     await ensureWorktree(branch, worktreeDir);
   } finally {
     releaseLock();
@@ -251,6 +252,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
       }
 
       const jiraRef = ticket?.jiraKey ? ` [${ticket.jiraKey}]` : "";
+      await ensureGitIdentity(worktreeDir);
       await run("git", ["commit", "-m", `fix(${LABEL_PREFIX_SLUG}):${jiraRef} ${branch}`], worktreeDir);
       const { stdout } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
       commitSha = stdout.trim();
@@ -409,6 +411,7 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
   for (const line of changedFiles) console.log(`[developer]   ${line}`);
 
   const commitMsg = `fix(${LABEL_PREFIX_SLUG}): [${ticket?.jiraKey ?? ticketId.slice(0, 8)}] ${ticket?.category ?? "accessibility fix"}`;
+  await ensureGitIdentity(worktreeDir);
   await run("git", ["commit", "-m", commitMsg], worktreeDir);
   const { stdout: shaOut } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
   const commitSha = shaOut.trim();
@@ -467,6 +470,7 @@ async function _fixBuildErrors(worktreeDir: string, reviewComments: string): Pro
   }
 
   const commitMsg = `fix(${LABEL_PREFIX_SLUG}): fix build errors from review feedback`;
+  await ensureGitIdentity(worktreeDir);
   await run("git", ["commit", "-m", commitMsg], worktreeDir);
   const { stdout: shaOut } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
   const commitSha = shaOut.trim();

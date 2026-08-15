@@ -32,6 +32,7 @@ import { runWithPipelineContext, setPipelineCycleNumber } from "../observability
 import { SilentLangGraphTracer } from "../observability/silent-langgraph-tracer.js";
 import { run } from "../lib/exec.js";
 import { gitRepoMutex } from "../lib/mutex.js";
+import { assertTargetRepoConfigured, ensureFreshQaBase } from "../lib/repo-config.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
 import { join } from "node:path";
 import path from "node:path";
@@ -145,6 +146,7 @@ export function routeAfterTriage(state: typeof CycleState.State) {
 
 // Git/DB setup only, no model call — not wrapped in runAgentTrace.
 async function prepareBranchNode(state: typeof CycleState.State) {
+  const repoPath = assertTargetRepoConfigured();
   const epicKey = state.epicKey;
 
   const openTickets = epicKey
@@ -164,7 +166,7 @@ async function prepareBranchNode(state: typeof CycleState.State) {
 
   const releaseLock = await gitRepoMutex.acquire();
   try {
-    await run("git", ["fetch", "origin", QA_BRANCH], TARGET_REPO_PATH);
+    await ensureFreshQaBase(repoPath);
     const startPoint = `origin/${QA_BRANCH}`;
     try {
       await run("git", ["worktree", "add", "-b", branch, worktreeDir, startPoint], TARGET_REPO_PATH);
