@@ -1,25 +1,36 @@
 /**
- * LangGraph orchestrator — single-branch batch pipeline:
+ * LangGraph orchestrator — single-branch batch pipeline, PR-gated:
  *
- *   scan → triage → [open tickets?]
- *     yes → prepareBranch (one branch for all tickets)
+ *   recoverDanglingWork → [in-progress tickets stranded by a crashed prior
+ *     run, with a recoverable branch/PR?]
+ *       yes → pushBranch → createPR (idempotent) → reviewPR → ... (rejoins the
+ *             normal flow below at "review the entire PR")
+ *       no  → scan → triage → [open tickets?]
+ *     yes → preProcessEmail → prepareBranch (one branch for all tickets)
  *         → fixNext (developer fixes one ticket, commits) → [more tickets?]
  *             yes → fixNext (loop)
- *             no  → pushBranch → reviewer (reviews entire branch)
+ *             no  → pushBranch → createPR (idempotent — reuses an open PR)
+ *                   → reviewPR (reviews entire PR diff, posts line comments)
  *                   → [approved?]
- *                     yes → deploy (merges branch into QA) → cleanup → scan
- *                     no  → autofix (fix build errors) → reviewer (retry, up to MAX_REVIEW_RETRIES)
- *                           → still failing → cleanup → scan
- *     no tickets after fresh scan → release
+ *                     yes → approvePR → mergePR (merges the PR into QA) → cleanup
+ *                     no  → requestChanges → fixPR (Fix Agent, same branch/PR)
+ *                           → reviewPR (retry, up to MAX_REVIEW_RETRIES)
+ *                           → still failing → cleanup (+ alert)
+ *   cleanup → [any of THIS cycle's own tickets (state.epicKey) still not
+ *              done/parked/flagged?]
+ *       yes → scan (re-verify against the freshly-deployed site, then triage/
+ *             fix whatever from this cycle is still outstanding)
+ *       no  → release (this cycle's tickets are all resolved)
+ *     no tickets after fresh scan → release (post-process email + final report)
  */
 import "dotenv/config";
 import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { db } from "../db/client.js";
-import { tickets, iterationCycles } from "../db/schema.js";
-import { eq, and, inArray } from "drizzle-orm";
+import { tickets, issues, iterationCycles, fixAttempts, reportsGenerated } from "../db/schema.js";
+import { eq, and, inArray, notInArray } from "drizzle-orm";
 import { triageFromReports } from "../triage/triage-from-reports.js";
-import { fixTicketOnBranch, fixBuildErrors, type BatchFixResult } from "../development/developer-agent.js";
+import { fixTicketOnBranch, fixBuildErrors, recordFixAttempts, type BatchFixResult } from "../development/developer-agent.js";
 import { reviewBranch } from "../review/reviewer-agent.js";
 import { deployBranch } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
@@ -32,10 +43,16 @@ import { runWithPipelineContext, setPipelineCycleNumber } from "../observability
 import { SilentLangGraphTracer } from "../observability/silent-langgraph-tracer.js";
 import { run } from "../lib/exec.js";
 import { gitRepoMutex } from "../lib/mutex.js";
+import { withRetry } from "../lib/retry.js";
 import { assertTargetRepoConfigured, ensureFreshQaBase } from "../lib/repo-config.js";
-import { LABEL_PREFIX_SLUG } from "../lib/config.js";
+import { LABEL_PREFIX, LABEL_PREFIX_SLUG, JIRA_BASE_URL } from "../lib/config.js";
+import { logAudit } from "../lib/audit-log.js";
+import { notifyUnrecoverableError } from "../lib/notify.js";
+import { sendEmail } from "../integrations/email.js";
+import { renderPreProcessEmailHtml, renderPreProcessEmailText } from "../integrations/report-template.js";
 import { join } from "node:path";
 import path from "node:path";
+import { existsSync } from "node:fs";
 
 const MAX_CYCLES = 20;
 const MAX_REVIEW_RETRIES = parseInt(process.env.MAX_REVIEW_RETRIES ?? "2", 10);
@@ -90,11 +107,168 @@ const CycleState = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => true,
   }),
+  prNumber: Annotation<number | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
+  prUrl: Annotation<string | null>({
+    reducer: (_prev, next) => next,
+    default: () => null,
+  }),
 });
 
 const DEPLOY_SETTLE_MS = parseInt(process.env.DEPLOY_SETTLE_MS ?? "60000", 10);
 
 // ── Nodes ──────────────────────────────────────────────────────────────────
+
+/**
+ * Cold-start recovery: every fresh invocation starts a brand-new LangGraph
+ * thread_id (see _runOrchestratorCycle), so if a previous process died mid-cycle
+ * (crash, kill -9, container restart) after tickets were moved to "in_progress"
+ * and a branch/PR was created, that work is invisible to LangGraph's own
+ * checkpoint resume — it belongs to a thread nobody will ever resume. Without
+ * this node, prepareBranch only ever looks at status="open" tickets, so it
+ * reports "no open tickets" and the orchestrator jumps straight to release,
+ * leaving the dangling branch/PR unreviewed and unmerged forever.
+ *
+ * This runs once at the very start of every invocation (before "scan") and
+ * looks for tickets stuck in "in_progress" with a recoverable branch. If
+ * found, it reconstructs the graph state needed to re-enter the normal
+ * pushBranch → createPR → reviewPR → approvePR → mergePR pipeline for that
+ * branch — which re-reviews, then approves/merges (or requests changes) the
+ * existing PR exactly like a freshly-fixed batch would.
+ */
+async function recoverDanglingWorkNode(state: typeof CycleState.State) {
+  // "in_progress" = claimed by prepareBranch but the developer agent never
+  // committed; "in_review" = committed (and possibly pushed/PR'd) but the
+  // process died before deploy-agent could mark it "done". Both are stuck
+  // mid-flight work from a crashed prior run.
+  const stuckTickets = await db.select().from(tickets).where(inArray(tickets.status, ["in_progress", "in_review"]));
+  if (stuckTickets.length === 0) return {};
+
+  const ticketIds = stuckTickets.map((t) => t.id);
+  const attempts = await db.select().from(fixAttempts).where(inArray(fixAttempts.ticketId, ticketIds));
+
+  const latestByTicket = new Map<string, typeof fixAttempts.$inferSelect>();
+  for (const a of attempts) {
+    const cur = latestByTicket.get(a.ticketId);
+    if (!cur || a.createdAt > cur.createdAt) latestByTicket.set(a.ticketId, a);
+  }
+
+  interface BranchGroup {
+    ticketIds: string[];
+    latestCreatedAt: Date;
+    prNumber: number | null;
+    prUrl: string | null;
+  }
+  const byBranch = new Map<string, BranchGroup>();
+  for (const [ticketId, attempt] of latestByTicket) {
+    if (!attempt.branch) continue;
+    const group = byBranch.get(attempt.branch) ?? { ticketIds: [], latestCreatedAt: attempt.createdAt, prNumber: null, prUrl: null };
+    group.ticketIds.push(ticketId);
+    if (attempt.createdAt > group.latestCreatedAt) group.latestCreatedAt = attempt.createdAt;
+    if (attempt.prNumber != null) {
+      group.prNumber = attempt.prNumber;
+      group.prUrl = attempt.prUrl;
+    }
+    byBranch.set(attempt.branch, group);
+  }
+
+  // Tickets stuck in_progress with no fix-attempt row at all (crashed before
+  // the first commit) have nothing to recover — send them back to the queue.
+  const recoverableTicketIds = new Set([...byBranch.values()].flatMap((g) => g.ticketIds));
+  const orphanTicketIds = ticketIds.filter((id) => !recoverableTicketIds.has(id));
+  if (orphanTicketIds.length > 0) {
+    console.warn(`[orchestrate] ${orphanTicketIds.length} in-progress ticket(s) had no recoverable branch — resetting to open.`);
+    await db.update(tickets).set({ status: "open" }).where(inArray(tickets.id, orphanTicketIds));
+  }
+
+  if (byBranch.size === 0) return {};
+
+  // Only one batch can be actively resumed per invocation; if more than one
+  // dangling branch exists (e.g. two separate crashes), resume the most
+  // recently active one now — the next invocation of this node will pick up
+  // the rest, since their tickets are still "in_progress" until then.
+  const [branch, group] = [...byBranch.entries()].sort(
+    (a, b) => b[1].latestCreatedAt.getTime() - a[1].latestCreatedAt.getTime(),
+  )[0];
+
+  console.log(
+    `[orchestrate] Found dangling in-progress work on branch "${branch}" (${group.ticketIds.length} ticket(s)) from a previous interrupted run — resuming review/merge instead of reporting "no open tickets".`,
+  );
+
+  assertTargetRepoConfigured();
+  const worktreeDir = join(TARGET_REPO_PATH, "..", ".worktrees", branch.replace(/\//g, "-"));
+  let recovered = existsSync(worktreeDir);
+
+  if (!recovered) {
+    const releaseLock = await gitRepoMutex.acquire();
+    try {
+      try {
+        await run("git", ["worktree", "add", worktreeDir, branch], TARGET_REPO_PATH);
+        recovered = true;
+      } catch {
+        // Local branch ref is gone too (e.g. worktree dir manually deleted) —
+        // fall back to the pushed remote branch, since createPR already
+        // pushed it before the process died.
+        await run("git", ["fetch", "origin", branch], TARGET_REPO_PATH);
+        await run("git", ["worktree", "add", "-b", branch, worktreeDir, `origin/${branch}`], TARGET_REPO_PATH);
+        recovered = true;
+      }
+    } catch (err) {
+      console.warn(
+        `[orchestrate] Could not recover branch "${branch}" from local refs or origin — resetting its ticket(s) to open.`,
+        (err as Error).message?.slice(0, 200),
+      );
+    } finally {
+      releaseLock();
+    }
+  }
+
+  if (!recovered) {
+    await db.update(tickets).set({ status: "open" }).where(inArray(tickets.id, group.ticketIds));
+    return {};
+  }
+
+  for (const t of stuckTickets) {
+    if (group.ticketIds.includes(t.id) && t.jiraKey) {
+      try {
+        await tracker.comment(t.jiraKey, `Resuming an interrupted remediation run — recovered branch \`${branch}\` and continuing the review/merge process.`);
+      } catch { /* best-effort */ }
+    }
+  }
+
+  await logAudit({
+    cycleId: state.cycleId,
+    action: "recovery.dangling_work_resumed",
+    actor: "orchestrator",
+    entityType: "branch",
+    entityId: branch,
+    details: { ticketCount: group.ticketIds.length, prNumber: group.prNumber },
+    status: "success",
+  });
+
+  return {
+    branch,
+    worktreeDir,
+    fixedTicketIds: group.ticketIds,
+    openTicketIds: [],
+    currentTicketIndex: 0,
+    prNumber: group.prNumber,
+    prUrl: group.prUrl,
+    reviewVerdict: null,
+    retryCount: 0,
+    freshScan: false,
+  };
+}
+
+function routeAfterRecovery(state: typeof CycleState.State) {
+  if (state.branch) {
+    console.log(`[orchestrate] Resuming pipeline on recovered branch ${state.branch} — skipping scan/triage for this pass.`);
+    return "pushBranch";
+  }
+  return "scan";
+}
 
 // Scanning (Playwright/axe only, no model call) — not wrapped in runAgentTrace
 // so LangSmith traces retain only nodes that invoke a model or the Claude API.
@@ -141,7 +315,80 @@ export function routeAfterTriage(state: typeof CycleState.State) {
     console.log("[orchestrate] Triage found no actionable issues — moving to release.");
     return "release";
   }
-  return "prepareBranch";
+  return "preProcessEmail";
+}
+
+const A11Y_REPORT_PATH = join(PROJECT_ROOT, "a11y-reports", "index.html");
+
+// Sends the pre-process notification once per cycle (idempotent via
+// reportsGenerated) — no model call, not wrapped in runAgentTrace.
+async function preProcessEmailNode(state: typeof CycleState.State) {
+  try {
+    const [already] = await db
+      .select()
+      .from(reportsGenerated)
+      .where(and(eq(reportsGenerated.cycleId, state.cycleId), eq(reportsGenerated.type, "pre_process_email")));
+    if (already) {
+      console.log(`[orchestrate] Pre-process email already sent for cycle ${state.cycleId} — skipping.`);
+      return {};
+    }
+
+    const epicFilter = state.epicKey ? eq(tickets.epicKey, state.epicKey) : undefined;
+    const openTickets = epicFilter
+      ? await db.select().from(tickets).where(and(eq(tickets.status, "open"), epicFilter))
+      : await db.select().from(tickets).where(eq(tickets.status, "open"));
+
+    const ticketIssueIds = openTickets.flatMap((t) => (t.issueIds as string[] | null) ?? []);
+    const relatedIssues = ticketIssueIds.length > 0
+      ? await db.select().from(issues).where(inArray(issues.id, ticketIssueIds))
+      : [];
+    const severityCounts: Record<string, number> = {};
+    for (const i of relatedIssues) {
+      severityCounts[i.severity] = (severityCounts[i.severity] ?? 0) + 1;
+    }
+
+    const data = {
+      projectLabel: LABEL_PREFIX,
+      cycleId: state.cycleId,
+      generatedAt: new Date(),
+      totalIssues: relatedIssues.length,
+      severityCounts,
+      tickets: openTickets.map((t) => ({ jiraKey: t.jiraKey, id: t.id, category: t.category })),
+      plannedBranch: null,
+    };
+
+    const attachments = existsSync(A11Y_REPORT_PATH) ? [{ filename: "a11y-report.html", path: A11Y_REPORT_PATH }] : undefined;
+
+    await sendEmail(
+      `[${LABEL_PREFIX}] Cycle ${state.cycleId} — pre-process report`,
+      renderPreProcessEmailText(data),
+      renderPreProcessEmailHtml(data),
+      attachments,
+    );
+
+    await db
+      .insert(reportsGenerated)
+      .values({ cycleId: state.cycleId, type: "pre_process_email", filePath: null })
+      .onConflictDoNothing({ target: [reportsGenerated.cycleId, reportsGenerated.type] });
+
+    await logAudit({
+      cycleId: state.cycleId,
+      action: "email.pre_process_sent",
+      actor: "orchestrator",
+      details: { totalIssues: relatedIssues.length, ticketCount: openTickets.length },
+      status: "success",
+    });
+  } catch (err) {
+    console.warn(`[orchestrate] Pre-process email failed for cycle ${state.cycleId} — continuing.`, (err as Error).message?.slice(0, 300));
+    await logAudit({
+      cycleId: state.cycleId,
+      action: "email.pre_process_failed",
+      actor: "orchestrator",
+      details: { error: (err as Error).message?.slice(0, 300) },
+      status: "failure",
+    });
+  }
+  return {};
 }
 
 // Git/DB setup only, no model call — not wrapped in runAgentTrace.
@@ -265,108 +512,213 @@ function routeAfterFix(state: typeof CycleState.State) {
 const PUSH_MAX_RETRIES = 3;
 const PUSH_RETRY_DELAY_MS = 3000;
 
+// Shared push-with-retry helper — backs both pushBranchNode and fixPRNode's
+// re-push after a Fix Agent commit. Serializes on gitRepoMutex per attempt
+// since git holds a repo-level lock.
+async function pushBranchWithRetry(worktreeDir: string, branch: string, label: string): Promise<void> {
+  const authRemote = vcs.authenticatedRemoteUrl();
+  await withRetry(
+    async () => {
+      const releaseLock = await gitRepoMutex.acquire();
+      try {
+        if (authRemote) {
+          await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
+        }
+        await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
+      } finally {
+        releaseLock();
+      }
+    },
+    { retries: PUSH_MAX_RETRIES, delayMs: PUSH_RETRY_DELAY_MS, label },
+  );
+}
+
 // git push only, no model call — not wrapped in runAgentTrace.
 async function pushBranchNode(state: typeof CycleState.State) {
-  const authRemote = vcs.authenticatedRemoteUrl();
-
-  for (let attempt = 1; attempt <= PUSH_MAX_RETRIES; attempt++) {
-    const releaseLock = await gitRepoMutex.acquire();
-    try {
-      if (authRemote) {
-        await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
-      }
-      await run("git", ["-c", "credential.helper=", "push", "-u", "origin", state.branch!], state.worktreeDir!);
-      console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
-      return {};
-    } catch (err) {
-      if (attempt < PUSH_MAX_RETRIES) {
-        console.warn(`[orchestrate] Push attempt ${attempt}/${PUSH_MAX_RETRIES} failed, retrying in ${PUSH_RETRY_DELAY_MS / 1000}s...`, (err as Error).message?.slice(0, 200));
-      } else {
-        console.error(`[orchestrate] Push failed after ${PUSH_MAX_RETRIES} attempts for branch ${state.branch}.`, (err as Error).message?.slice(0, 300));
-        throw err;
-      }
-    } finally {
-      releaseLock();
-    }
-    await new Promise((r) => setTimeout(r, PUSH_RETRY_DELAY_MS));
-  }
+  await pushBranchWithRetry(state.worktreeDir!, state.branch!, `push branch ${state.branch}`);
+  console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
   return {};
 }
 
-async function reviewerNode(state: typeof CycleState.State) {
+async function jiraKeysForTickets(ticketIds: string[]): Promise<string[]> {
+  if (ticketIds.length === 0) return [];
+  const rows = await db.select().from(tickets).where(inArray(tickets.id, ticketIds));
+  return rows.map((t) => t.jiraKey).filter((k): k is string => Boolean(k));
+}
+
+// Git/HTTP only, no model call — not wrapped in runAgentTrace. Idempotent:
+// always checks for an already-open PR before creating a new one, so a
+// crash-and-resume never creates a duplicate PR for the same branch.
+async function createPRNode(state: typeof CycleState.State) {
+  const jiraKeys = await jiraKeysForTickets(state.fixedTicketIds);
+
+  let ref = await vcs.findOpenPullRequest(state.branch!, QA_BRANCH);
+  if (!ref) {
+    const title = `[${LABEL_PREFIX}] Fix: ${jiraKeys.length > 0 ? jiraKeys.join(", ") : state.branch}`;
+    const bodyLines = [
+      `Automated accessibility fix for ${state.fixedTicketIds.length} ticket(s).`,
+      "",
+      ...jiraKeys.map((k) => (JIRA_BASE_URL ? `- [${k}](${JIRA_BASE_URL}/browse/${k})` : `- ${k}`)),
+    ];
+    ref = await vcs.createPullRequest(state.branch!, QA_BRANCH, title, bodyLines.join("\n"));
+    console.log(`[orchestrate] Created PR ${ref?.htmlUrl ?? "(vcs not configured)"} for branch ${state.branch}.`);
+  } else {
+    console.log(`[orchestrate] Reusing existing open PR #${ref.number} for branch ${state.branch}.`);
+  }
+
+  if (ref && state.fixedTicketIds.length > 0) {
+    await db
+      .update(fixAttempts)
+      .set({ prNumber: ref.number, prUrl: ref.htmlUrl })
+      .where(and(inArray(fixAttempts.ticketId, state.fixedTicketIds), eq(fixAttempts.branch, state.branch!)));
+  }
+
+  await logAudit({
+    cycleId: state.cycleId,
+    action: "pr.created",
+    actor: "orchestrator",
+    entityType: "pull_request",
+    entityId: ref ? String(ref.number) : null,
+    details: { branch: state.branch, ticketCount: state.fixedTicketIds.length },
+    status: ref ? "success" : "failure",
+  });
+
+  return { prNumber: ref?.number ?? null, prUrl: ref?.htmlUrl ?? null };
+}
+
+async function reviewPRNode(state: typeof CycleState.State) {
   return runAgentTrace("reviewer", async () => {
-    console.log(`[orchestrate] Reviewing branch ${state.branch} (${state.fixedTicketIds.length} ticket(s))...`);
-    const result = await reviewBranch(state.worktreeDir!, state.fixedTicketIds);
-    console.log(`[orchestrate] Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""}`);
+    console.log(`[orchestrate] Reviewing PR #${state.prNumber} on branch ${state.branch} (${state.fixedTicketIds.length} ticket(s))...`);
+    const result = await reviewBranch(state.worktreeDir!, state.fixedTicketIds, state.prNumber, state.cycleId);
+    console.log(`[orchestrate] Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""} (${result.blockingFindingsCount} blocking finding(s))`);
     return { reviewVerdict: result.verdict, reviewComments: result.comments };
   });
 }
 
-function routeAfterReview(state: typeof CycleState.State) {
+function routeAfterReviewPR(state: typeof CycleState.State) {
   if (state.reviewVerdict === "approved") {
-    return "deploy";
+    return "approvePR";
   }
   if (state.retryCount < MAX_REVIEW_RETRIES) {
-    console.log(`[orchestrate] Review rejected (attempt ${state.retryCount + 1}/${MAX_REVIEW_RETRIES}) — sending back to autofix.`);
-    return "autofix";
+    console.log(`[orchestrate] Review rejected (attempt ${state.retryCount + 1}/${MAX_REVIEW_RETRIES}) — requesting changes.`);
+    return "requestChanges";
   }
   console.log(`[orchestrate] Review rejected after ${MAX_REVIEW_RETRIES} retries — giving up.`);
   return "cleanup";
 }
 
-async function autofixNode(state: typeof CycleState.State) {
-  return runAgentTrace("autofix", async () => {
-    console.log(`[orchestrate] Autofixing build errors (retry ${state.retryCount + 1}/${MAX_REVIEW_RETRIES})...`);
+// Mechanical GitHub-side "Changes Requested" transition — no model call.
+async function requestChangesNode(state: typeof CycleState.State) {
+  if (state.prNumber != null) {
+    await vcs.requestChanges(state.prNumber, state.reviewComments ?? "Changes requested — see review comments.");
+    await logAudit({
+      cycleId: state.cycleId,
+      action: "pr.changes_requested",
+      actor: "reviewer",
+      entityType: "pull_request",
+      entityId: String(state.prNumber),
+      details: { retryCount: state.retryCount },
+      status: "success",
+    });
+  }
+  return {};
+}
+
+async function fixPRNode(state: typeof CycleState.State) {
+  return runAgentTrace("developer", async () => {
+    console.log(`[orchestrate] Fix Agent addressing review feedback (retry ${state.retryCount + 1}/${MAX_REVIEW_RETRIES})...`);
 
     let commitSha: string | null = null;
     try {
       commitSha = await fixBuildErrors(state.worktreeDir!, state.reviewComments ?? "Build failed");
     } catch (err) {
-      console.error(`[orchestrate] Autofix agent failed:`, (err as Error).message?.slice(0, 300));
+      console.error(`[orchestrate] Fix Agent failed:`, (err as Error).message?.slice(0, 300));
       return { retryCount: state.retryCount + 1 };
     }
 
     if (commitSha) {
-      console.log(`[orchestrate] Autofix committed: ${commitSha.slice(0, 7)} — re-pushing...`);
-      for (let attempt = 1; attempt <= PUSH_MAX_RETRIES; attempt++) {
-        const releaseLock = await gitRepoMutex.acquire();
-        try {
-          const authRemote = vcs.authenticatedRemoteUrl();
-          if (authRemote) {
-            await run("git", ["remote", "set-url", "origin", authRemote], state.worktreeDir!);
-          }
-          await run("git", ["-c", "credential.helper=", "push", "origin", state.branch!], state.worktreeDir!);
-          break;
-        } catch (err) {
-          if (attempt < PUSH_MAX_RETRIES) {
-            console.warn(`[orchestrate] Autofix push attempt ${attempt}/${PUSH_MAX_RETRIES} failed, retrying...`, (err as Error).message?.slice(0, 200));
-          } else {
-            console.error(`[orchestrate] Autofix push failed after ${PUSH_MAX_RETRIES} attempts.`);
-          }
-        } finally {
-          releaseLock();
-        }
-        await new Promise((r) => setTimeout(r, PUSH_RETRY_DELAY_MS));
+      console.log(`[orchestrate] Fix Agent committed: ${commitSha.slice(0, 7)} — re-pushing to the same branch/PR...`);
+      // Record a new attempt per ticket for this commit — without this,
+      // deploy-agent's independent fix_attempts/review_results re-check would
+      // keep finding the earlier rejected attempt as "latest" after a retry.
+      await recordFixAttempts(state.fixedTicketIds, state.branch!, commitSha);
+      try {
+        await pushBranchWithRetry(state.worktreeDir!, state.branch!, `fixPR re-push ${state.branch}`);
+      } catch (err) {
+        console.error(`[orchestrate] Fix Agent push failed:`, (err as Error).message?.slice(0, 300));
       }
     } else {
-      console.warn(`[orchestrate] Autofix made no changes.`);
+      console.warn(`[orchestrate] Fix Agent made no changes.`);
     }
 
     return { retryCount: state.retryCount + 1 };
   });
 }
 
-async function deployNode(state: typeof CycleState.State) {
+// Mechanical GitHub-side approval — no model call. Re-verifies the PR hasn't
+// drifted (a stray commit landing between review and approval) before
+// approving, looping back to reviewPR if it has.
+async function approvePRNode(state: typeof CycleState.State) {
+  if (state.prNumber == null) return {};
+
+  const status = await vcs.getPullRequestStatus(state.prNumber);
+  const { stdout: headSha } = await run("git", ["rev-parse", "HEAD"], state.worktreeDir!);
+  if (status && status.headSha && status.headSha !== headSha.trim()) {
+    console.warn(`[orchestrate] PR #${state.prNumber} head drifted since review (${status.headSha.slice(0, 7)} vs ${headSha.trim().slice(0, 7)}) — re-reviewing before approval.`);
+    return { reviewVerdict: null };
+  }
+
+  await vcs.approvePullRequest(state.prNumber, "Automated review passed — approving.");
+  await logAudit({
+    cycleId: state.cycleId,
+    action: "pr.approved",
+    actor: "reviewer",
+    entityType: "pull_request",
+    entityId: String(state.prNumber),
+    details: {},
+    status: "success",
+  });
+  return {};
+}
+
+function routeAfterApprove(state: typeof CycleState.State) {
+  if (state.reviewVerdict === null) {
+    return "reviewPR";
+  }
+  return "mergePR";
+}
+
+async function mergePRNode(state: typeof CycleState.State) {
   return runAgentTrace("deploy", async () => {
-    console.log(`[orchestrate] Deploying branch ${state.branch}...`);
+    console.log(`[orchestrate] Merging PR #${state.prNumber} (branch ${state.branch})...`);
     try {
-      const result = await deployBranch(state.branch!, state.fixedTicketIds);
-      console.log(`[orchestrate] Deploy complete — ${result.ticketsDeployed} ticket(s) merged.`);
+      const result = await deployBranch(state.branch!, state.fixedTicketIds, state.prNumber!, state.prUrl, state.cycleId);
+      if (result.status === "succeeded") {
+        console.log(`[orchestrate] Merge complete — ${result.ticketsDeployed} ticket(s) merged.`);
+      } else {
+        console.warn(`[orchestrate] Merge ${result.status}${result.blockReason ? `: ${result.blockReason}` : ""}.`);
+        if (result.status === "failed") {
+          await notifyUnrecoverableError({
+            cycleId: state.cycleId,
+            stage: "mergePR",
+            action: "merge_failed",
+            error: new Error(result.blockReason ?? "Merge failed after retries/conflict resolution."),
+            details: { branch: state.branch, prNumber: state.prNumber },
+          });
+        }
+      }
     } catch (err) {
-      console.error(`[orchestrate] Deploy failed for branch ${state.branch}:`, (err as Error).message?.slice(0, 300));
+      console.error(`[orchestrate] Merge failed for PR #${state.prNumber} (${state.branch}):`, (err as Error).message?.slice(0, 300));
       for (const ticketId of state.fixedTicketIds) {
         await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
       }
+      await notifyUnrecoverableError({
+        cycleId: state.cycleId,
+        stage: "mergePR",
+        action: "merge_threw",
+        error: err,
+        details: { branch: state.branch, prNumber: state.prNumber },
+      });
     }
     return { freshScan: false };
   });
@@ -402,6 +754,19 @@ async function removeWorktreeWithRetry(worktreeDir: string, branch: string | nul
 
 // Worktree/DB cleanup only, no model call — not wrapped in runAgentTrace.
 async function cleanupNode(state: typeof CycleState.State) {
+  // Review-retry budget exhausted — this is the give-up path, not the
+  // routine "no commits produced" early exit. Alert and leave the PR open
+  // (not closed) so a human can pick it up rather than losing the work.
+  if (state.reviewVerdict === "rejected" && state.retryCount >= MAX_REVIEW_RETRIES && state.prNumber != null) {
+    await notifyUnrecoverableError({
+      cycleId: state.cycleId,
+      stage: "reviewPR",
+      action: "review_retries_exhausted",
+      error: new Error(`PR #${state.prNumber} still rejected after ${MAX_REVIEW_RETRIES} review/fix cycles.`),
+      details: { branch: state.branch, prNumber: state.prNumber, prUrl: state.prUrl },
+    });
+  }
+
   if (state.worktreeDir) {
     await removeWorktreeWithRetry(state.worktreeDir, state.branch);
   }
@@ -420,10 +785,28 @@ async function cleanupNode(state: typeof CycleState.State) {
     );
   }
 
-  return { branch: null, worktreeDir: null, openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0 };
+  return { branch: null, worktreeDir: null, openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0, prNumber: null, prUrl: null };
 }
 
-function routeAfterCleanup() {
+/**
+ * After a merge (or a give-up), decide whether this cycle is actually done —
+ * scoped to this cycle's own tickets (state.epicKey), not "is the whole site
+ * issue-free." Re-scanning always happens first either way (this only gates
+ * whether we go on to fix more of THIS cycle's tickets, or release now), so
+ * a fresh deploy always gets verified before the cycle ends.
+ */
+export async function routeAfterCleanup(state: typeof CycleState.State) {
+  const epicFilter = state.epicKey ? eq(tickets.epicKey, state.epicKey) : undefined;
+  const unresolved = await db
+    .select({ id: tickets.id })
+    .from(tickets)
+    .where(epicFilter ? and(epicFilter, notInArray(tickets.status, ["done", "parked", "flagged"])) : notInArray(tickets.status, ["done", "parked", "flagged"]));
+
+  if (unresolved.length === 0) {
+    console.log(`[orchestrate] All ticket(s) for cycle ${state.cycleId} are resolved (done/parked/flagged) — releasing.`);
+    return "release";
+  }
+  console.log(`[orchestrate] ${unresolved.length} ticket(s) from this cycle still unresolved — continuing to scan/verify.`);
   return "scan";
 }
 
@@ -441,26 +824,36 @@ async function releaseNode(state: typeof CycleState.State) {
 
 export function buildGraph() {
   const graph = new StateGraph(CycleState)
+    .addNode("recoverDanglingWork", recoverDanglingWorkNode)
     .addNode("scan", scanNode)
     .addNode("triage", triageNode)
+    .addNode("preProcessEmail", preProcessEmailNode)
     .addNode("prepareBranch", prepareBranchNode)
     .addNode("fixNext", fixNextNode)
     .addNode("pushBranch", pushBranchNode)
-    .addNode("reviewer", reviewerNode)
-    .addNode("autofix", autofixNode)
-    .addNode("deploy", deployNode)
+    .addNode("createPR", createPRNode)
+    .addNode("reviewPR", reviewPRNode)
+    .addNode("requestChanges", requestChangesNode)
+    .addNode("fixPR", fixPRNode)
+    .addNode("approvePR", approvePRNode)
+    .addNode("mergePR", mergePRNode)
     .addNode("cleanup", cleanupNode)
     .addNode("release", releaseNode)
-    .addEdge(START, "scan")
+    .addEdge(START, "recoverDanglingWork")
+    .addConditionalEdges("recoverDanglingWork", routeAfterRecovery, ["pushBranch", "scan"])
     .addEdge("scan", "triage")
-    .addConditionalEdges("triage", routeAfterTriage, ["prepareBranch", "release"])
+    .addConditionalEdges("triage", routeAfterTriage, ["preProcessEmail", "release"])
+    .addEdge("preProcessEmail", "prepareBranch")
     .addConditionalEdges("prepareBranch", routeAfterPrepareBranch, ["fixNext", "release", "scan"])
     .addConditionalEdges("fixNext", routeAfterFix, ["fixNext", "pushBranch", "cleanup"])
-    .addEdge("pushBranch", "reviewer")
-    .addConditionalEdges("reviewer", routeAfterReview, ["deploy", "autofix", "cleanup"])
-    .addEdge("autofix", "reviewer")
-    .addEdge("deploy", "cleanup")
-    .addConditionalEdges("cleanup", routeAfterCleanup, ["scan"])
+    .addEdge("pushBranch", "createPR")
+    .addEdge("createPR", "reviewPR")
+    .addConditionalEdges("reviewPR", routeAfterReviewPR, ["approvePR", "requestChanges", "cleanup"])
+    .addEdge("requestChanges", "fixPR")
+    .addEdge("fixPR", "reviewPR")
+    .addConditionalEdges("approvePR", routeAfterApprove, ["reviewPR", "mergePR"])
+    .addEdge("mergePR", "cleanup")
+    .addConditionalEdges("cleanup", routeAfterCleanup, ["scan", "release"])
     .addEdge("release", END);
 
   return graph;
@@ -496,7 +889,7 @@ async function _runOrchestratorCycle(existingCycleId?: string) {
   }
 
   console.log(`[orchestrate] Starting pipeline — cycle ${cycle.id}`);
-  console.log(`[orchestrate] Flow: scan → triage → prepareBranch → fix (all tickets) → push → review → deploy → release`);
+  console.log(`[orchestrate] Flow: recoverDanglingWork → scan → triage → preProcessEmail → prepareBranch → fix (all tickets) → push → createPR → reviewPR → approvePR/requestChanges → mergePR → cleanup → [cycle's tickets all resolved?] → release, else re-scan/verify and continue`);
 
   await runWithPipelineContext({ pipeline_run_id: cycle.id, cycle_number: 0 }, async () =>
     runIssueResolutionPipeline(async () => {
@@ -515,6 +908,8 @@ async function _runOrchestratorCycle(existingCycleId?: string) {
           retryCount: 0,
           triageFoundIssues: false,
           freshScan: true,
+          prNumber: null,
+          prUrl: null,
         },
         {
           configurable: { thread_id: cycle.id },

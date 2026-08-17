@@ -9,7 +9,7 @@
  * Keep this in sync manually when the root schema changes (or add a simple sync
  * check script later if drift becomes an issue).
  */
-import { pgTable, text, timestamp, integer, boolean, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, integer, boolean, jsonb, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 const id = () =>
@@ -62,6 +62,7 @@ export const fixAttempts = pgTable("fix_attempts", {
   commitSha: text("commit_sha"),
   pushStatus: text("push_status").notNull().default("pending"),
   prUrl: text("pr_url"),
+  prNumber: integer("pr_number"),
   developerAgentRunId: text("developer_agent_run_id").notNull(),
   attemptNumber: integer("attempt_number").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -76,6 +77,9 @@ export const reviewResults = pgTable("review_results", {
   resolvedIssueIds: jsonb("resolved_issue_ids").notNull().default([]),
   scopeGuardFlagged: boolean("scope_guard_flagged").notNull().default(false),
   comments: text("comments").notNull().default(""),
+  findings: jsonb("findings").notNull().default([]),
+  blockingFindingsCount: integer("blocking_findings_count").notNull().default(0),
+  prReviewId: text("pr_review_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -84,6 +88,8 @@ export const deployments = pgTable("deployments", {
   env: text("env").notNull(),
   commitSha: text("commit_sha").notNull(),
   tag: text("tag"),
+  prNumber: integer("pr_number"),
+  prUrl: text("pr_url"),
   deployedAt: timestamp("deployed_at", { withTimezone: true }).notNull().defaultNow(),
   status: text("status").notNull(),
 });
@@ -97,3 +103,35 @@ export const iterationCycles = pgTable("iteration_cycles", {
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
 });
+
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    id: id(),
+    cycleId: text("cycle_id")
+      .notNull()
+      .references(() => iterationCycles.id),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
+    action: text("action").notNull(),
+    actor: text("actor").notNull(),
+    entityType: text("entity_type"),
+    entityId: text("entity_id"),
+    details: jsonb("details").notNull().default({}),
+    status: text("status").notNull(),
+  },
+  (table) => [index("audit_log_cycle_idx").on(table.cycleId)],
+);
+
+export const reportsGenerated = pgTable(
+  "reports_generated",
+  {
+    id: id(),
+    cycleId: text("cycle_id")
+      .notNull()
+      .references(() => iterationCycles.id),
+    type: text("type").notNull(),
+    filePath: text("file_path"),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("reports_generated_cycle_type_idx").on(table.cycleId, table.type)],
+);

@@ -1,6 +1,6 @@
 import { db, requireDb } from "./db";
 import { iterationCycles, tickets, fixAttempts, reviewResults, deployments } from "./schema";
-import { eq, gte, and, inArray } from "drizzle-orm";
+import { eq, gte, and, inArray, desc } from "drizzle-orm";
 import type { RunStatus, Stage } from "./types";
 
 /**
@@ -41,9 +41,15 @@ export async function deriveRunStatus(
     const parked = allTickets.filter((t) => t.status === "parked");
     const flagged = allTickets.filter((t) => t.status === "flagged");
 
-    // prUrl: per the plan, release-agent.ts currently hardcodes this to null,
-    // so we won't find one here — surface it as null, not as an error.
-    const prUrl = null;
+    // Most recent deployment/PR for this cycle window, now that deploy-agent
+    // persists prUrl on the deployments row.
+    const [latestDeployment] = await database
+      .select()
+      .from(deployments)
+      .where(gte(deployments.deployedAt, cycle.startedAt))
+      .orderBy(desc(deployments.deployedAt))
+      .limit(1);
+    const prUrl = latestDeployment?.prUrl ?? null;
 
     return {
       cycleId,
@@ -227,13 +233,24 @@ function inferStageFromLog(lines: string[]): Stage | null {
       return "fix";
     }
 
-    // Review stage: [reviewer] activity
-    if (line.includes('[reviewer]') || line.includes('Reviewing branch')) {
+    // Review stage: [reviewer] activity — includes PR review/changes-requested/fix-agent cycles
+    if (
+      line.includes('[reviewer]') ||
+      line.includes('Reviewing branch') ||
+      line.includes('Reviewing PR') ||
+      line.includes('Fix Agent addressing review feedback')
+    ) {
       return "review";
     }
 
-    // Deploy stage
-    if (line.includes('Deploying branch') || line.includes('Pushed branch')) {
+    // Deploy stage — includes PR creation/approval/merge
+    if (
+      line.includes('Deploying branch') ||
+      line.includes('Pushed branch') ||
+      line.includes('Created PR') ||
+      line.includes('Reusing existing open PR') ||
+      line.includes('Merging PR')
+    ) {
       return "deploy";
     }
 
@@ -279,11 +296,11 @@ function filterLogsByStage(lines: string[]): Record<Stage, string[]> {
       byStage.triage.push(line);
     } else if (line.includes('[developer]') || line.includes('Fixing ticket') || line.includes('prepareBranch') || line.includes('Pushed branch') || line.includes('[fix]')) {
       byStage.fix.push(line);
-    } else if (line.includes('[reviewer]') || line.includes('Reviewing branch') || line.includes('Reviewer verdict') || line.includes('[review]')) {
+    } else if (line.includes('[reviewer]') || line.includes('Reviewing branch') || line.includes('Reviewing PR') || line.includes('Reviewer verdict') || line.includes('[review]')) {
       byStage.review.push(line);
-    } else if (line.includes('Autofixing build errors') || line.includes('[autofix]')) {
+    } else if (line.includes('Autofixing build errors') || line.includes('Fix Agent addressing review feedback') || line.includes('[autofix]')) {
       byStage.autofix.push(line);
-    } else if (line.includes('Deploying branch') || line.includes('deploy') || line.includes('[deploy]')) {
+    } else if (line.includes('Deploying branch') || line.includes('Merging PR') || line.includes('Created PR') || line.includes('Reusing existing open PR') || line.includes('deploy') || line.includes('[deploy]')) {
       byStage.deploy.push(line);
     } else if (line.includes('Running release') || line.includes('[release]')) {
       byStage.release.push(line);
@@ -324,10 +341,15 @@ function parseStageDetailFromLog(lines: string[]): string | null {
     /Running Playwright/,
     /Running triage from reports/,
     /Pushed branch/,
+    /Created PR .*/,
+    /Reusing existing open PR #(\d+)/,
     /Reviewing branch/,
+    /Reviewing PR #(\d+)/,
     /Reviewer verdict/,
     /Autofixing build errors \(retry (\d+)\/(\d+)\)/,
+    /Fix Agent addressing review feedback \(retry (\d+)\/(\d+)\)/,
     /Deploying branch/,
+    /Merging PR #(\d+)/,
     /Running release for cycle/,
   ];
 

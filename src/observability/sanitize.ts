@@ -20,6 +20,16 @@ function redactString(value: string): string {
   return out;
 }
 
+/**
+ * Plain, non-trace-specific secret redaction for any surface that echoes
+ * agent- or error-produced text: PR/Jira comments, emails, reports, audit
+ * log details. Wraps the same pattern list as sanitizeForTrace so there is
+ * one source of truth for what counts as a secret.
+ */
+export function redactSecrets(text: string): string {
+  return redactString(text);
+}
+
 /** Recursively redact secrets and truncate large strings for LangSmith traces. */
 export function sanitizeForTrace(value: unknown, depth = 0): unknown {
   if (depth > 8) return "[max depth]";

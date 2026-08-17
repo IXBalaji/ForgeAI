@@ -9,12 +9,14 @@ import { runReviewerAgent, reviewBranch, type ReviewerVerdict, type BranchReview
 import { runDeployAgent, deployBranch, type DeployResult, type BranchDeployResult } from "../deploy/deploy-agent.js";
 import { runReleaseAgent } from "../release/release-agent.js";
 import { getTrackerProvider } from "../integrations/tracker/factory.js";
+import { getVcsProvider } from "../integrations/vcs/factory.js";
 import { runOrchestratorCycle } from "../orchestrator/graph.js";
 import { initObservability, withSpan } from "../integrations/observability.js";
 import { db } from "../db/client.js";
 import { iterationCycles } from "../db/schema.js";
 
 const tracker = getTrackerProvider();
+const vcs = getVcsProvider();
 
 const program = new Command();
 program.name("a11y-agents").description("Autonomous accessibility remediation agent system");
@@ -159,7 +161,7 @@ program
     const { join } = await import("node:path");
     const { tickets, issues } = await import("../db/schema.js");
     const { gitRepoMutex } = await import("../lib/mutex.js");
-    const { LABEL_PREFIX_SLUG } = await import("../lib/config.js");
+    const { LABEL_PREFIX_SLUG, LABEL_PREFIX } = await import("../lib/config.js");
     const { run } = await import("../lib/exec.js");
 
     const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
@@ -245,12 +247,24 @@ program
       releaseLock();
     }
 
-    // Stage 4: Review entire branch
+    // Stage 3.5: Create (or reuse) the PR targeting QA_BRANCH
+    let ref = await vcs.findOpenPullRequest(branch, QA_BRANCH);
+    if (!ref) {
+      ref = await vcs.createPullRequest(
+        branch,
+        QA_BRANCH,
+        `[${LABEL_PREFIX}] Fix: ${jiraKeys.length > 0 ? jiraKeys.join(", ") : branch}`,
+        `Automated accessibility fix for ${fixedTicketIds.length} ticket(s).`,
+      );
+    }
+    console.log(`[fix:all] PR: ${ref?.htmlUrl ?? "(vcs not configured)"}`);
+
+    // Stage 4: Review entire branch/PR
     console.log(`\n[fix:all] Running reviewer on entire branch...`);
     let branchReview: BranchReviewVerdict;
     try {
-      branchReview = await withSpan("agent.reviewer", () => reviewBranch(worktreeDir, fixedTicketIds));
-      console.log(`[fix:all] Reviewer verdict: ${branchReview.verdict}`);
+      branchReview = await withSpan("agent.reviewer", () => reviewBranch(worktreeDir, fixedTicketIds, ref?.number ?? null));
+      console.log(`[fix:all] Reviewer verdict: ${branchReview.verdict} (${branchReview.blockingFindingsCount} blocking finding(s))`);
     } catch (err) {
       console.error(`[fix:all] Reviewer failed: ${(err as Error).message}`);
       releaseLock = await gitRepoMutex.acquire();
@@ -264,13 +278,20 @@ program
 
     if (branchReview.verdict !== "approved") {
       console.log(`[fix:all] Reviewer rejected — all ${fixedTicketIds.length} ticket(s) remain open.`);
+      if (ref) await vcs.requestChanges(ref.number, "Changes requested — see review comments.");
       return;
     }
 
-    // Stage 5: Deploy — merge the single branch
-    console.log(`\n[fix:all] Deploying branch ${branch}...`);
+    if (ref) await vcs.approvePullRequest(ref.number, "Automated review passed — approving.");
+
+    // Stage 5: Deploy — merge the PR
+    console.log(`\n[fix:all] Merging PR for branch ${branch}...`);
+    if (!ref) {
+      console.error(`[fix:all] No PR available to merge — vcs not configured.`);
+      return;
+    }
     try {
-      const result: BranchDeployResult = await withSpan("agent.deploy", () => deployBranch(branch, fixedTicketIds));
+      const result: BranchDeployResult = await withSpan("agent.deploy", () => deployBranch(branch, fixedTicketIds, ref.number, ref.htmlUrl));
       console.log(`[fix:all] Deploy done:`, JSON.stringify(result, null, 2));
     } catch (err) {
       console.error(`[fix:all] Deploy failed: ${(err as Error).message}`);

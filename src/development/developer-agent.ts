@@ -36,6 +36,28 @@ export interface BatchFixResult {
   jiraKey: string | null;
 }
 
+/**
+ * Records a fix_attempts row per ticket for a commit on the shared batch
+ * branch. Without this, deploy-agent's checkMergeReadiness (which
+ * independently re-queries fix_attempts/review_results rather than trusting
+ * in-memory graph state) can never find an "approved" review for these
+ * tickets and would block every merge forever.
+ */
+export async function recordFixAttempts(ticketIds: string[], branch: string, commitSha: string): Promise<void> {
+  const runId = `dev-${Date.now()}`;
+  for (const ticketId of ticketIds) {
+    const previous = await db.select().from(fixAttempts).where(eq(fixAttempts.ticketId, ticketId));
+    await db.insert(fixAttempts).values({
+      ticketId,
+      branch,
+      commitSha,
+      pushStatus: "pending",
+      developerAgentRunId: runId,
+      attemptNumber: previous.length + 1,
+    });
+  }
+}
+
 async function ensureWorktree(branch: string, worktreeDir: string): Promise<void> {
   // Always base the worktree on origin/<qa> so we start from the latest remote
   // state — using a local branch ref can be stale if a previous deploy merged
@@ -416,6 +438,9 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
   const { stdout: shaOut } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
   const commitSha = shaOut.trim();
   console.log(`[developer] Committed ${commitSha} for ${jiraRef}`);
+
+  const { stdout: branchOut } = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], worktreeDir);
+  await recordFixAttempts([ticketId], branchOut.trim(), commitSha);
 
   await db.update(tickets).set({ status: "in_review" }).where(eq(tickets.id, ticketId));
 

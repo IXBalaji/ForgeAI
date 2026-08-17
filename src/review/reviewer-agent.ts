@@ -1,23 +1,28 @@
 import "dotenv/config";
 import { join } from "node:path";
 import { existsSync, rmSync } from "node:fs";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, desc } from "drizzle-orm";
 import { traceable } from "langsmith/traceable";
 import { db } from "../db/client.js";
 import { fixAttempts, tickets, issues, reviewResults } from "../db/schema.js";
 import { run } from "../lib/exec.js";
 import { scopeGuard } from "./scope-guard.js";
 import { testGate } from "./test-gate.js";
-import { adversarialReview } from "./adversarial-review.js";
+import { adversarialReview, type ReviewFinding } from "./adversarial-review.js";
 import { startEphemeralPreview } from "./ephemeral-preview.js";
 import { runAxeScan, fingerprintFinding } from "../scan/axe-scan.js";
 import { getTrackerProvider } from "../integrations/tracker/factory.js";
+import { getVcsProvider } from "../integrations/vcs/factory.js";
+import type { PrReviewComment } from "../integrations/vcs/types.js";
 import { gitRepoMutex } from "../lib/mutex.js";
+import { redactSecrets } from "../observability/sanitize.js";
+import { logAudit } from "../lib/audit-log.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 
 const tracker = getTrackerProvider();
+const vcs = getVcsProvider();
 
 export interface ReviewerVerdict {
   reviewResultId: string;
@@ -29,6 +34,30 @@ export interface BranchReviewVerdict {
   verdict: "approved" | "rejected";
   scopeGuardFlagged: boolean;
   comments: string;
+  findings: ReviewFinding[];
+  blockingFindingsCount: number;
+  prReviewId: string | null;
+}
+
+function findingToComment(f: ReviewFinding): PrReviewComment | null {
+  if (!f.file || !f.line) return null;
+  const prefix = f.severity === "blocking" ? "🚫 BLOCKING" : "💡 Suggestion";
+  return { path: f.file, line: f.line, side: "RIGHT", body: `**${prefix} (${f.category})**\n\n${redactSecrets(f.message)}` };
+}
+
+function summarizeFindings(findings: ReviewFinding[]): string {
+  if (findings.length === 0) return "No issues found.";
+  return findings
+    .map((f) => `- [${f.severity.toUpperCase()}/${f.category}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ""} — ` : ""}${redactSecrets(f.message)}`)
+    .join("\n");
+}
+
+async function acceptanceCriteriaFor(ticketId: string): Promise<string | undefined> {
+  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+  if (!ticket) return undefined;
+  const ticketIssues = await db.select().from(issues).where(inArray(issues.id, (ticket.issueIds as string[] | null) ?? []));
+  if (ticketIssues.length === 0) return undefined;
+  return ticketIssues.map((i) => `- ${i.wcagRule} at ${i.selector} on ${i.pageUrl} (severity: ${i.severity})`).join("\n");
 }
 
 export const runReviewerAgent = traceable(_runReviewerAgent, {
@@ -165,17 +194,17 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   }
 
   // Adversarial review — focuses only on changed lines
-  const llmConcern = await adversarialReview(worktreeDir);
+  const findings = await adversarialReview(worktreeDir, await acceptanceCriteriaFor(attempt.ticketId));
+  const blockingFindingsCount = findings.filter((f) => f.severity === "blocking").length;
 
-  // Verdict: only build/lint/test failures are hard blockers.
-  // Adversarial review is advisory — logged but doesn't block.
+  // Verdict: build/lint/test failures AND blocking review findings are hard blockers.
   // Re-scan is non-blocking when unavailable.
   const rescanPassed = rescanSkipped || stillFailing.length === 0;
   const verdict: "approved" | "rejected" =
-    tests.passed && rescanPassed ? "approved" : "rejected";
+    tests.passed && rescanPassed && blockingFindingsCount === 0 ? "approved" : "rejected";
 
-  if (llmConcern) {
-    console.warn("[reviewer] Adversarial review concern (advisory, not blocking):", llmConcern.slice(0, 300));
+  if (findings.length > 0) {
+    console.warn(`[reviewer] Adversarial review findings (${blockingFindingsCount} blocking):`, summarizeFindings(findings).slice(0, 500));
   }
 
   const rescanStatus = rescanSkipped
@@ -188,7 +217,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
     `Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`,
     `Targeted re-scan: ${rescanStatus}`,
     guard.flagged ? `Scope guard: FLAGGED — ${guard.reason}` : "Scope guard: clear",
-    llmConcern ? `Adversarial review (advisory): ${llmConcern.slice(0, 500)}` : "Adversarial review: LGTM",
+    `Adversarial review: ${summarizeFindings(findings)}`,
   ].join("\n");
 
   const [reviewResult] = await db
@@ -199,6 +228,8 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
       resolvedIssueIds,
       scopeGuardFlagged: guard.flagged,
       comments,
+      findings,
+      blockingFindingsCount,
     })
     .returning();
 
@@ -230,9 +261,11 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
 }
 
 /**
- * Review all changes on a shared branch at once. The worktree already exists
- * and contains all ticket fixes as separate commits. Runs scope guard, build/
- * lint/test gate, and adversarial review on the full diff.
+ * Review all changes on a shared branch at once, against a PR. The worktree
+ * already exists and contains all ticket fixes as separate commits. Runs
+ * scope guard, build/lint/test gate, and adversarial review on the full diff,
+ * then posts line-level comments for every finding to the PR (both
+ * severities) — only "blocking" findings gate the verdict.
  */
 export const reviewBranch = traceable(_reviewBranch, {
   name: "reviewer.review_branch",
@@ -243,6 +276,8 @@ export const reviewBranch = traceable(_reviewBranch, {
 async function _reviewBranch(
   worktreeDir: string,
   ticketIds: string[],
+  prNumber: number | null,
+  cycleId?: string,
 ): Promise<BranchReviewVerdict> {
   const { stdout: nameOnly } = await run("git", ["diff", "--name-only", `origin/${QA_BRANCH}`], worktreeDir);
   const touchedFiles = nameOnly.trim().split("\n").filter(Boolean);
@@ -251,28 +286,81 @@ async function _reviewBranch(
 
   if (touchedFiles.length === 0) {
     console.warn("[reviewer] No files changed on branch — nothing to review.");
-    return { verdict: "rejected", scopeGuardFlagged: false, comments: "No files changed on the branch." };
+    return { verdict: "rejected", scopeGuardFlagged: false, comments: "No files changed on the branch.", findings: [], blockingFindingsCount: 0, prReviewId: null };
   }
 
   const guard = await scopeGuard(worktreeDir);
   const tests = await testGate(worktreeDir, touchedFiles);
   console.log(`[reviewer] Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`);
 
-  const llmConcern = await adversarialReview(worktreeDir);
+  // Combine acceptance criteria across all tickets in this batch.
+  const acCriteria = (await Promise.all(ticketIds.map(acceptanceCriteriaFor))).filter(Boolean).join("\n");
+  const findings = await adversarialReview(worktreeDir, acCriteria || undefined);
+  const blockingFindingsCount = findings.filter((f) => f.severity === "blocking").length;
 
-  const verdict: "approved" | "rejected" = tests.passed ? "approved" : "rejected";
+  const verdict: "approved" | "rejected" = tests.passed && blockingFindingsCount === 0 ? "approved" : "rejected";
 
-  if (llmConcern) {
-    console.warn("[reviewer] Adversarial review concern (advisory, not blocking):", llmConcern.slice(0, 300));
+  if (findings.length > 0) {
+    console.warn(`[reviewer] Adversarial review findings (${blockingFindingsCount} blocking):`, summarizeFindings(findings).slice(0, 500));
   }
 
   const comments = [
     `Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`,
     guard.flagged ? `Scope guard: FLAGGED — ${guard.reason}` : "Scope guard: clear",
-    llmConcern ? `Adversarial review (advisory): ${llmConcern.slice(0, 500)}` : "Adversarial review: LGTM",
+    `Adversarial review: ${summarizeFindings(findings)}`,
     `Tickets reviewed: ${ticketIds.length}`,
     `Files changed: ${touchedFiles.length}`,
   ].join("\n");
 
-  return { verdict, scopeGuardFlagged: guard.flagged, comments };
+  // Post line-level comments for every finding (both severities); only
+  // blocking ones gate the verdict above.
+  let prReviewId: string | null = null;
+  if (prNumber != null && findings.length > 0) {
+    const prComments = findings.map(findingToComment).filter((c): c is NonNullable<typeof c> => c !== null);
+    try {
+      prReviewId = await vcs.addReviewComments(prNumber, prComments);
+    } catch (err) {
+      console.warn(`[reviewer] Failed to post PR review comments for PR #${prNumber}:`, (err as Error).message?.slice(0, 200));
+    }
+    if (cycleId) {
+      await logAudit({
+        cycleId,
+        action: "pr.review_comments_posted",
+        actor: "reviewer",
+        entityType: "pull_request",
+        entityId: String(prNumber),
+        details: { findingCount: findings.length, blockingFindingsCount },
+        status: "success",
+      });
+    }
+  }
+
+  // Persist one review_results row per ticket's latest fix_attempts row —
+  // deploy-agent's merge-readiness checklist independently re-queries these
+  // tables rather than trusting in-memory graph state, so without this a
+  // merge can never be confirmed "approved" and would block forever.
+  for (const ticketId of ticketIds) {
+    const [latestAttempt] = await db
+      .select()
+      .from(fixAttempts)
+      .where(eq(fixAttempts.ticketId, ticketId))
+      .orderBy(desc(fixAttempts.createdAt))
+      .limit(1);
+    if (!latestAttempt) {
+      console.warn(`[reviewer] No fix_attempts row found for ticket ${ticketId.slice(0, 8)} — skipping review_results persistence.`);
+      continue;
+    }
+    await db.insert(reviewResults).values({
+      fixAttemptId: latestAttempt.id,
+      verdict,
+      resolvedIssueIds: [],
+      scopeGuardFlagged: guard.flagged,
+      comments,
+      findings,
+      blockingFindingsCount,
+      prReviewId,
+    });
+  }
+
+  return { verdict, scopeGuardFlagged: guard.flagged, comments, findings, blockingFindingsCount, prReviewId };
 }

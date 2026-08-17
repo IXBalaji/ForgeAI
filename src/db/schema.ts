@@ -6,6 +6,7 @@ import {
   boolean,
   jsonb,
   uniqueIndex,
+  index,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
@@ -59,6 +60,7 @@ export const fixAttempts = pgTable("fix_attempts", {
   commitSha: text("commit_sha"),
   pushStatus: text("push_status").notNull().default("pending"),
   prUrl: text("pr_url"),
+  prNumber: integer("pr_number"),
   developerAgentRunId: text("developer_agent_run_id").notNull(),
   attemptNumber: integer("attempt_number").notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
@@ -73,6 +75,11 @@ export const reviewResults = pgTable("review_results", {
   resolvedIssueIds: jsonb("resolved_issue_ids").notNull().default([]),
   scopeGuardFlagged: boolean("scope_guard_flagged").notNull().default(false),
   comments: text("comments").notNull().default(""),
+  // Structured findings from the adversarial review pass, both severities.
+  findings: jsonb("findings").notNull().default([]),
+  blockingFindingsCount: integer("blocking_findings_count").notNull().default(0),
+  // GitHub PR review id this pass posted, if any — dedupes re-posting on retry.
+  prReviewId: text("pr_review_id"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
@@ -83,8 +90,10 @@ export const deployments = pgTable("deployments", {
   // The rollback tag (e.g. elms-qa-1a2b3c4) — "redeploy the last-good tag"
   // instead of a git-archaeology exercise, per the guardrails doc.
   tag: text("tag"),
+  prNumber: integer("pr_number"),
+  prUrl: text("pr_url"),
   deployedAt: timestamp("deployed_at", { withTimezone: true }).notNull().defaultNow(),
-  status: text("status").notNull(), // succeeded | failed
+  status: text("status").notNull(), // succeeded | failed | blocked
 });
 
 export const iterationCycles = pgTable("iteration_cycles", {
@@ -99,3 +108,42 @@ export const iterationCycles = pgTable("iteration_cycles", {
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
 });
+
+// Append-only audit trail for every workflow-visible action (PR lifecycle,
+// Jira calls, emails). Kept in Postgres alongside the rest of the pipeline's
+// state so it's queryable with the same tooling as everything else, rather
+// than a separate log-file format. `details` must always be pre-sanitized
+// (see observability/sanitize.ts::redactSecrets) before insertion.
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    id: id(),
+    cycleId: text("cycle_id")
+      .notNull()
+      .references(() => iterationCycles.id),
+    timestamp: timestamp("timestamp", { withTimezone: true }).notNull().defaultNow(),
+    action: text("action").notNull(), // e.g. "pr.created", "pr.merged", "jira.transition", "email.sent"
+    actor: text("actor").notNull(), // orchestrator | reviewer | developer | deploy
+    entityType: text("entity_type"), // ticket | pull_request | epic | cycle
+    entityId: text("entity_id"),
+    details: jsonb("details").notNull().default({}),
+    status: text("status").notNull(), // success | failure
+  },
+  (table) => [index("audit_log_cycle_idx").on(table.cycleId)],
+);
+
+// Dedup guard for reports/emails: a unique (cycleId, type) row prevents a
+// retried/resumed cycle from re-generating a report or re-sending an email.
+export const reportsGenerated = pgTable(
+  "reports_generated",
+  {
+    id: id(),
+    cycleId: text("cycle_id")
+      .notNull()
+      .references(() => iterationCycles.id),
+    type: text("type").notNull(), // pre_process_email | post_process_email | final_report
+    filePath: text("file_path"),
+    generatedAt: timestamp("generated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [uniqueIndex("reports_generated_cycle_type_idx").on(table.cycleId, table.type)],
+);
