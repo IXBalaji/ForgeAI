@@ -882,6 +882,200 @@ body {
   background-color: var(--color-text-muted);
 }
 
+/* === Settings Page === */
+.settings-page {
+  max-width: 680px;
+}
+
+.settings-header {
+  margin-bottom: var(--space-8);
+}
+
+.settings-header h1 {
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: var(--space-2);
+}
+
+.settings-header__desc {
+  font-size: 1rem;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+}
+
+.settings-status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-6);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.settings-status--ok {
+  background-color: var(--color-success-bg);
+  border: 1px solid rgba(22, 163, 74, 0.2);
+  color: var(--color-success);
+}
+
+.settings-status--warn {
+  background-color: var(--color-warning-bg);
+  border: 1px solid rgba(180, 83, 9, 0.2);
+  color: var(--color-warning);
+}
+
+.settings-status__icon {
+  font-size: 1.125rem;
+  flex-shrink: 0;
+  margin-top: 1px;
+}
+
+.settings-status strong {
+  display: block;
+  margin-bottom: var(--space-1);
+}
+
+.settings-status p {
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+.settings-status code {
+  font-family: var(--font-mono);
+  background-color: var(--color-surface-raised);
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 0.813rem;
+}
+
+.settings-card {
+  background-color: var(--color-surface);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+  box-shadow: var(--shadow-sm);
+  margin-bottom: var(--space-6);
+}
+
+.settings-card h2 {
+  font-size: 1.125rem;
+  font-weight: 700;
+  margin-bottom: var(--space-5);
+  color: var(--color-text);
+}
+
+.recipients-summary {
+  border-left: 3px solid var(--color-accent);
+}
+
+.recipient-group {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.recipient-group:last-child {
+  margin-bottom: 0;
+}
+
+.recipient-group__label {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  min-width: 2.5rem;
+  padding-top: 5px;
+}
+
+.recipient-group__tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.recipient-tag {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.813rem;
+  padding: 4px 10px;
+  background-color: var(--color-accent-bg);
+  border: 1px solid var(--color-accent-border);
+  border-radius: 999px;
+  color: var(--color-text);
+}
+
+.settings-field {
+  margin-bottom: var(--space-5);
+}
+
+.settings-field label {
+  display: block;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: var(--space-2);
+}
+
+.settings-field__hint {
+  display: block;
+  font-weight: 400;
+  font-size: 0.813rem;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+.settings-field input {
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  color: var(--color-text);
+  background-color: var(--color-background);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.settings-field input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-bg);
+}
+
+.settings-field input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.settings-message {
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  font-size: 0.875rem;
+  margin-bottom: var(--space-4);
+}
+
+.settings-message--success {
+  background-color: var(--color-success-bg);
+  color: var(--color-success);
+  border: 1px solid rgba(22, 163, 74, 0.2);
+}
+
+.settings-message--error {
+  background-color: var(--color-error-bg);
+  color: var(--color-error);
+  border: 1px solid rgba(220, 38, 38, 0.2);
+}
+
+.settings-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-4);
+}
+
 /* === About Page === */
 .about-page {
   max-width: 960px;

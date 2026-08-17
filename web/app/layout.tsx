@@ -25,6 +25,9 @@ export default function RootLayout({
               <Link href="/" className="site-nav__link">
                 Dashboard
               </Link>
+              <Link href="/settings" className="site-nav__link">
+                Settings
+              </Link>
               <Link href="/about" className="site-nav__link">
                 About
               </Link>

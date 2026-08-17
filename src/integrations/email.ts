@@ -3,14 +3,15 @@ import { createTransport } from "nodemailer";
 import { withRetry } from "../lib/retry.js";
 import { redactSecrets } from "../observability/sanitize.js";
 
-const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, EMAIL_TO } = process.env;
+const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, EMAIL_TO, EMAIL_CC, EMAIL_BCC } = process.env;
 
 export function isEmailConfigured(): boolean {
   return Boolean(SMTP_HOST && SMTP_USER && SMTP_PASS && EMAIL_FROM && EMAIL_TO);
 }
 
 if (isEmailConfigured()) {
-  console.log(`[email] SMTP configured: host=${SMTP_HOST}, port=${SMTP_PORT || 587}, from=${EMAIL_FROM}, to=${EMAIL_TO}`);
+  const extras = [EMAIL_CC && `cc=${EMAIL_CC}`, EMAIL_BCC && `bcc=${EMAIL_BCC}`].filter(Boolean).join(", ");
+  console.log(`[email] SMTP configured: host=${SMTP_HOST}, port=${SMTP_PORT || 587}, from=${EMAIL_FROM}, to=${EMAIL_TO}${extras ? `, ${extras}` : ""}`);
 } else {
   const missing = [
     !SMTP_HOST && "SMTP_HOST",
@@ -48,14 +49,18 @@ export async function sendEmail(subject: string, text: string, html?: string, at
   }
 
   const recipients = EMAIL_TO!.split(",").map((a) => a.trim());
+  const ccList = EMAIL_CC ? EMAIL_CC.split(",").map((a) => a.trim()) : [];
+  const bccList = EMAIL_BCC ? EMAIL_BCC.split(",").map((a) => a.trim()) : [];
 
   try {
-    console.log(`[email] Sending report to ${recipients.join(", ")} — subject: "${subject}"`);
+    console.log(`[email] Sending report to ${recipients.join(", ")}${ccList.length ? ` cc=${ccList.join(", ")}` : ""}${bccList.length ? ` bcc=${bccList.join(", ")}` : ""} — subject: "${subject}"`);
     const info = await withRetry(
       () =>
         transporter.sendMail({
           from: EMAIL_FROM,
           to: recipients,
+          ...(ccList.length && { cc: ccList }),
+          ...(bccList.length && { bcc: bccList }),
           subject,
           text,
           html: html ?? text.replace(/\n/g, "<br>"),
