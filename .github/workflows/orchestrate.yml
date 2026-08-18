@@ -72,7 +72,7 @@ jobs:
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
         run: |
           if [ -n "${{ github.event.inputs.cycleId }}" ]; then
-            npm run orchestrate -- --cycle-id "${{ github.event.inputs.cycleId }}"
+            npm run pipeline -- --cycle-id "${{ github.event.inputs.cycleId }}"
           else
-            npm run orchestrate
+            npm run pipeline
           fi
