@@ -1,13 +1,9 @@
-import { config } from "dotenv";
-import { resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-config({ path: resolve(__dirname, "../../.env") });
-
+// DATABASE_URL comes from web/.env.local (local dev) or Vercel's
+// dashboard-configured env vars in deployed environments — Next.js loads
+// both automatically, no explicit dotenv config needed.
 const connectionString = process.env.DATABASE_URL;
 
 const pool = connectionString
@@ -21,7 +17,7 @@ export const db = (pool ? drizzle(pool) : null) as ReturnType<typeof drizzle> | 
 
 export function requireDb() {
   if (!db) {
-    throw new Error("DATABASE_URL is required in the root .env file");
+    throw new Error("DATABASE_URL is required (web/.env.local locally, or a Vercel env var when deployed)");
   }
   return db;
 }

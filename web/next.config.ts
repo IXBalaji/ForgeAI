@@ -1,9 +1,9 @@
 import type { NextConfig } from "next";
-import { config } from "dotenv";
-import path from "node:path";
 
-config({ path: path.resolve(process.cwd(), "../.env") });
-
+// Env vars come from web/.env.local (local dev, via `vercel env pull`) or
+// directly from Vercel's dashboard-configured env vars in deployed
+// environments — never from the root ../.env, which isn't part of this
+// deployment (only web/ is deployed).
 const nextConfig: NextConfig = {
   reactStrictMode: true,
   env: {

@@ -1,0 +1,78 @@
+name: Orchestrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      cycleId:
+        description: "Pre-inserted iteration_cycles row ID (optional — dashboard-triggered runs pass this; manual runs can leave it blank)"
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout ForgeAI
+        uses: actions/checkout@v4
+
+      - name: Checkout target repo
+        uses: actions/checkout@v4
+        with:
+          repository: IXBalaji/employee-leave-management-system
+          path: target-repo
+          token: ${{ secrets.TARGET_REPO_PAT }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Run orchestrator
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Model/effort tiering and target-repo identity below are plain
+          # config, not secrets — matching .env.example's defaults. Edit
+          # these values directly in this file rather than adding GitHub
+          # secrets for them: a referenced secret that doesn't exist resolves
+          # to an empty string (not unset), which would silently override the
+          # code's own `?? "default"` fallbacks with "".
+          CLAUDE_DEVELOPER_MODEL: "claude-haiku-4-5-20251001"
+          CLAUDE_DEVELOPER_EFFORT: "medium"
+          CLAUDE_REVIEWER_MODEL: "claude-haiku-4-5-20251001"
+          CLAUDE_REVIEWER_EFFORT: "medium"
+          CLAUDE_VISION_MODEL: "claude-opus-4-6"
+          CLAUDE_DEVELOPER_MAX_TURNS: "40"
+          TARGET_REPO_PATH: ${{ github.workspace }}/target-repo
+          TARGET_FRONTEND_URL: ${{ secrets.TARGET_FRONTEND_URL }}
+          TARGET_SCAN_ROUTES: ${{ secrets.TARGET_SCAN_ROUTES }}
+          DEPLOY_SETTLE_MS: "120000"
+          PROJECT_KEY: ${{ secrets.PROJECT_KEY }}
+          GITHUB_TOKEN: ${{ secrets.TARGET_REPO_PAT }}
+          GITHUB_OWNER: "IXBalaji"
+          GITHUB_REPO: "employee-leave-management-system"
+          GITHUB_BASE_BRANCH: "master"
+          GITHUB_QA_BRANCH: "qa"
+          GIT_AUTHOR_NAME: "ForgeAI Bot"
+          GIT_AUTHOR_EMAIL: "forgeai-bot@users.noreply.github.com"
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: |
+          if [ -n "${{ github.event.inputs.cycleId }}" ]; then
+            npm run orchestrate -- --cycle-id "${{ github.event.inputs.cycleId }}"
+          else
+            npm run orchestrate
+          fi

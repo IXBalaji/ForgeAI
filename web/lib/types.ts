@@ -49,7 +49,7 @@ export interface ActiveRun {
 
 export interface StartResponse {
   cycleId: string;
-  pid: number;
+  pid: number | null;
   startedAt: string;
 }
 

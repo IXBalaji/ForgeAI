@@ -7,9 +7,18 @@
 
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { isNull } from "drizzle-orm";
+import { db } from "./db";
+import { iterationCycles } from "./schema";
 
 const RUN_DIR = join(process.cwd(), ".run");
 const LOCK_FILE = join(RUN_DIR, "active.lock");
+
+// On Vercel there's no shared filesystem between the dashboard and the
+// GitHub Actions runner that actually executes the orchestrator — PID/lock
+// files are meaningless there. Fall back to the DB row's endedAt as the
+// liveness signal instead.
+const usesDbLiveness = Boolean(process.env.VERCEL);
 
 export interface ActiveRunRecord {
   cycleId: string;
@@ -52,6 +61,7 @@ function isProcessAlive(pid: number): boolean {
  * Register a new active run — write the lock file and cache in memory.
  */
 export async function registerActiveRun(record: ActiveRunRecord): Promise<void> {
+  if (usesDbLiveness) return; // no local process/disk to track — DB is the source of truth
   await ensureRunDir();
   await fs.writeFile(LOCK_FILE, JSON.stringify(record, null, 2), "utf-8");
   activeRunCache.set(record.cycleId, record);
@@ -61,6 +71,7 @@ export async function registerActiveRun(record: ActiveRunRecord): Promise<void> 
  * Clear the active run — remove the lock file and clear the cache.
  */
 export async function clearActiveRun(cycleId: string): Promise<void> {
+  if (usesDbLiveness) return;
   await ensureRunDir();
   try {
     await fs.unlink(LOCK_FILE);
@@ -85,6 +96,23 @@ export async function getActiveRun(): Promise<
   | ({ active: true } & ActiveRunRecord)
   | ({ active: "stalled" } & ActiveRunRecord)
 > {
+  if (usesDbLiveness) {
+    // Known gap: an Actions run that crashes without the orchestrator ever
+    // setting endedAt looks identical to one still legitimately running —
+    // there's no PID to detect as dead. Revisit via the GitHub Actions run
+    // status API if stalled runs turn out to happen in practice.
+    if (!db) return { active: false };
+    const [openCycle] = await db
+      .select()
+      .from(iterationCycles)
+      .where(isNull(iterationCycles.endedAt))
+      .limit(1);
+    if (!openCycle) return { active: false };
+    // No PID exists for a run dispatched to GitHub Actions — 0 is a sentinel,
+    // never a real PID, so isProcessAlive-style checks elsewhere don't apply.
+    return { active: true, cycleId: openCycle.id, pid: 0, startedAt: openCycle.startedAt.toISOString() };
+  }
+
   await ensureRunDir();
 
   // Check in-memory cache first
