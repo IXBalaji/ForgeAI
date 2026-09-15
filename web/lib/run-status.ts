@@ -1,7 +1,7 @@
 import { db, requireDb } from "./db";
 import { iterationCycles, tickets, fixAttempts, reviewResults, deployments } from "./schema";
 import { eq, gte, and, inArray, desc } from "drizzle-orm";
-import type { RunStatus, Stage } from "./types";
+import type { RunStatus, RunMode, Stage } from "./types";
 
 /**
  * Derive the current status of a workflow run from DB rows + log tail.
@@ -27,6 +27,7 @@ export async function deriveRunStatus(
     throw new Error(`No iteration_cycles row found for ${cycleId}`);
   }
 
+  const mode = (cycle.mode as RunMode | undefined) ?? "full";
   const startedAt = cycle.startedAt.toISOString();
   const endedAt = cycle.endedAt?.toISOString() ?? null;
 
@@ -40,6 +41,7 @@ export async function deriveRunStatus(
     const fixed = allTickets.filter((t) => t.status === "done");
     const parked = allTickets.filter((t) => t.status === "parked");
     const flagged = allTickets.filter((t) => t.status === "flagged");
+    const open = allTickets.filter((t) => t.status === "open" || t.status === "in_progress" || t.status === "in_review");
 
     // Most recent deployment/PR for this cycle window, now that deploy-agent
     // persists prUrl on the deployments row.
@@ -51,11 +53,17 @@ export async function deriveRunStatus(
       .limit(1);
     const prUrl = latestDeployment?.prUrl ?? null;
 
+    // "scan"/"triage" runs never reach release — the last stage they ever
+    // touch is their own name, so showing "Release" as the completed badge
+    // would be misleading (nothing was released).
+    const completedStage: Stage = mode === "full" ? "release" : mode;
+
     return {
       cycleId,
+      mode,
       startedAt,
       endedAt,
-      stage: "release",
+      stage: completedStage,
       stageDetail: null,
       loopIterationHint: null,
       counts: await deriveCounts(cycle.startedAt, database),
@@ -67,6 +75,7 @@ export async function deriveRunStatus(
         fixed: fixed.map((t) => ({ id: t.id, jiraKey: t.jiraKey, category: t.category })),
         parked: parked.map((t) => ({ id: t.id, jiraKey: t.jiraKey, category: t.category })),
         flagged: flagged.map((t) => ({ id: t.id, jiraKey: t.jiraKey, category: t.category })),
+        open: open.map((t) => ({ id: t.id, jiraKey: t.jiraKey, category: t.category })),
         prUrl,
       },
       logsByStage: filterLogsByStage(logLines),
@@ -76,17 +85,23 @@ export async function deriveRunStatus(
   // Still running — derive coarse stage from DB rows + log patterns
   const stage = await deriveStageFromDB(cycle.startedAt, logLines, database);
   const stageDetail = parseStageDetailFromLog(logLines);
-  const loopIterationHint = parseLoopIterationFromLog(logLines);
+  const counts = await deriveCounts(cycle.startedAt, database);
+  // Once a merge has happened this cycle, every subsequent deployment marks
+  // the start of another fix→review→merge→verify pass — surface that as a
+  // "cycle N" hint instead of leaving the timeline looking identical to the
+  // first pass (DB-derived, so it survives log truncation unlike a regex).
+  const loopIterationHint = mode === "full" && counts.deployments > 0 ? counts.deployments + 1 : null;
   const logsByStage = filterLogsByStage(logLines);
 
   return {
     cycleId,
+    mode,
     startedAt,
     endedAt: null,
     stage,
     stageDetail,
     loopIterationHint,
-    counts: await deriveCounts(cycle.startedAt, database),
+    counts,
     recentLog: logLines.slice(-20),
     processAlive,
     failed: !processAlive && endedAt === null,
@@ -158,11 +173,18 @@ async function deriveStageFromDB(startedAt: Date, logLines: string[], database: 
     return "review";
   }
 
-  return logStage ?? "deploy";
+  // A branch has already been merged into qa this cycle — from here on
+  // (until the release agent runs) we're in the post-merge verification
+  // window: re-scan the live site, re-triage, and confirm which tickets are
+  // genuinely fixed (see triage-from-reports.ts's per-ticket verification).
+  if (logStage === "release") {
+    return "release";
+  }
+  return "verify";
 }
 
 const STAGE_ORDER: Record<Stage, number> = {
-  scan: 0, triage: 1, fix: 2, review: 3, autofix: 4, deploy: 5, cleanup: 6, release: 7, unknown: -1,
+  scan: 0, triage: 1, fix: 2, review: 3, autofix: 4, deploy: 5, cleanup: 6, verify: 7, release: 8, unknown: -1,
 };
 
 function stageOrder(stage: Stage): number {
@@ -243,13 +265,12 @@ function inferStageFromLog(lines: string[]): Stage | null {
       return "review";
     }
 
-    // Deploy stage — includes PR creation/approval/merge
+    // Deploy stage — pushing the batch branch and merging it into qa
+    // (direct git merge, no PR — see deploy-agent.ts's deployBranch)
     if (
-      line.includes('Deploying branch') ||
       line.includes('Pushed branch') ||
-      line.includes('Created PR') ||
-      line.includes('Reusing existing open PR') ||
-      line.includes('Merging PR')
+      line.includes('Merging branch') ||
+      line.includes('Merged') && line.includes('into')
     ) {
       return "deploy";
     }
@@ -285,6 +306,7 @@ function filterLogsByStage(lines: string[]): Record<Stage, string[]> {
     autofix: [],
     deploy: [],
     cleanup: [],
+    verify: [],
     release: [],
     unknown: []
   };
@@ -300,13 +322,17 @@ function filterLogsByStage(lines: string[]): Record<Stage, string[]> {
       byStage.review.push(line);
     } else if (line.includes('Autofixing build errors') || line.includes('Fix Agent addressing review feedback') || line.includes('[autofix]')) {
       byStage.autofix.push(line);
-    } else if (line.includes('Deploying branch') || line.includes('Merging PR') || line.includes('Created PR') || line.includes('Reusing existing open PR') || line.includes('deploy') || line.includes('[deploy]')) {
+    } else if (line.includes('Merging branch') || (line.includes('Merged') && line.includes('into')) || line.includes('[deploy]')) {
       byStage.deploy.push(line);
     } else if (line.includes('Running release') || line.includes('[release]')) {
       byStage.release.push(line);
     } else if (line.includes('[orchestrate]')) {
-      // General orchestrate lines — classify by content
-      if (line.includes('scan') || line.includes('Playwright')) {
+      // General orchestrate lines — classify by content. Checked before the
+      // generic "branch" match below, since a merge line ("Merging branch
+      // X into qa") would otherwise be misclassified as "fix" activity.
+      if (line.includes('Merging') || line.includes('merge') || line.includes('deploy')) {
+        byStage.deploy.push(line);
+      } else if (line.includes('scan') || line.includes('Playwright')) {
         byStage.scan.push(line);
       } else if (line.includes('triage')) {
         byStage.triage.push(line);
@@ -314,8 +340,6 @@ function filterLogsByStage(lines: string[]): Record<Stage, string[]> {
         byStage.fix.push(line);
       } else if (line.includes('review')) {
         byStage.review.push(line);
-      } else if (line.includes('deploy')) {
-        byStage.deploy.push(line);
       } else if (line.includes('release')) {
         byStage.release.push(line);
       } else {
@@ -362,20 +386,5 @@ function parseStageDetailFromLog(lines: string[]): string | null {
     }
   }
 
-  return null;
-}
-
-/**
- * Best-effort loop iteration count from log parsing.
- *
- * graph.ts's internal cycleNumber is NOT persisted, so this is the only way to
- * surface "iteration 2 of 20" — or null if not found.
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-function parseLoopIterationFromLog(_lines: string[]): number | null {
-  // The setPipelineCycleNumber call happens in scanNode after each scan,
-  // but the actual value isn't logged as literal text anywhere.
-  // We could parse "Waiting Ns for CI/CD..." lines which only appear on
-  // cycleNumber > 0, but that's fragile. For v1, return null.
   return null;
 }

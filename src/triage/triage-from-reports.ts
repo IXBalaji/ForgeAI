@@ -5,6 +5,7 @@ import { classifyIssues } from "./issue-classifier.js";
 import { buildTicketPayloads } from "./ticket-builder.js";
 import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { LABEL_PREFIX } from "../lib/config.js";
+import { confirmTicketFixed } from "../deploy/deploy-agent.js";
 
 const tracker = getTrackerProvider();
 import { and, eq, inArray } from "drizzle-orm";
@@ -37,9 +38,74 @@ export interface TriageFromReportsResult {
   };
 }
 
+// Must match the fingerprint formula used when issues are first inserted
+// below, so a re-scan's fingerprints can be compared against a ticket's
+// originally-recorded issueIds.
+function computeFingerprint(ruleId: string, selector: string, pageUrl: string): string {
+  return crypto.createHash("sha256").update(`${ruleId}:${selector}:${pageUrl}`).digest("hex");
+}
+
+/**
+ * Per-ticket verification against the fresh scan. A single cycle's fix
+ * branch can resolve several tickets (across several categories) at once, so
+ * checking "does this violation category still appear anywhere" isn't
+ * precise enough to know which specific ticket actually got fixed. Each
+ * ticket already carries the exact issue fingerprints it was created to fix
+ * (issueIds → issues.fingerprint) — comparing those against the fresh scan's
+ * fingerprints tells us, per ticket, whether it's genuinely resolved.
+ *
+ * Tickets sit in "in_review" from the moment the developer commits a fix
+ * until this check runs (deploy no longer marks them "done" at merge time —
+ * see deploy-agent.ts). Only once none of a ticket's original fingerprints
+ * reproduce in the live re-scan does it get marked "done"; otherwise it's
+ * reopened with just the still-failing issues so the next fix round doesn't
+ * re-attack work that's already proven resolved.
+ */
+async function verifyInReviewTickets(epicKey: string | null, freshFingerprints: Set<string>): Promise<void> {
+  const inReviewTickets = await db
+    .select()
+    .from(ticketsTable)
+    .where(
+      epicKey
+        ? and(eq(ticketsTable.status, "in_review"), eq(ticketsTable.epicKey, epicKey))
+        : eq(ticketsTable.status, "in_review"),
+    );
+
+  for (const t of inReviewTickets) {
+    const ticketIssueIds = (t.issueIds as string[] | null) ?? [];
+    const ticketIssues = ticketIssueIds.length > 0
+      ? await db.select().from(issues).where(inArray(issues.id, ticketIssueIds))
+      : [];
+    const stillFailing = ticketIssues.filter((i) => freshFingerprints.has(i.fingerprint));
+
+    if (stillFailing.length === 0) {
+      await confirmTicketFixed(t.id);
+      for (const i of ticketIssues) {
+        await db.update(issues).set({ status: "resolved" }).where(eq(issues.id, i.id));
+      }
+      console.log(`[triage] Verified fixed: ${t.jiraKey ?? t.id} (category "${t.category}") — ${ticketIssues.length} issue(s) no longer reproduce.`);
+    } else {
+      await db
+        .update(ticketsTable)
+        .set({ status: "open", issueIds: stillFailing.map((i) => i.id) })
+        .where(eq(ticketsTable.id, t.id));
+      if (t.jiraKey) {
+        try {
+          await tracker.transitionTicket(t.jiraKey, "To Do");
+        } catch (err) {
+          console.warn(`[triage] Failed to transition ${t.jiraKey} to To Do: ${(err as Error).message}`);
+        }
+      }
+      console.log(`[triage] Not fixed yet: ${t.jiraKey ?? t.id} (category "${t.category}") — ${stillFailing.length}/${ticketIssues.length} issue(s) still reproduce.`);
+    }
+  }
+}
+
 export async function triageFromReports(opts: {
   reportDir?: string;
   cycleId?: string;
+  /** Reuse an already-resolved epic (e.g. from a resumed/recovered cycle) instead of deriving one from cycleId. */
+  epicKey?: string | null;
   dryRun?: boolean;
 }): Promise<TriageFromReportsResult> {
   const reportDir = opts.reportDir ?? path.join(process.cwd(), "a11y-reports");
@@ -51,10 +117,31 @@ export async function triageFromReports(opts: {
   const aggregated = aggregateByRule(pages);
   console.log(`[triage] Aggregated into ${aggregated.length} unique violation types`);
 
+  let epicKey: string | null = opts.epicKey ?? null;
+  if (!epicKey && opts.cycleId && !opts.dryRun) {
+    epicKey = await tracker.ensureEpic(opts.cycleId);
+  }
+
+  // Run verification before the "no violations" early-return below — an
+  // empty scan is exactly the case where every in-review ticket should be
+  // confirmed fixed (zero fingerprints reproduce).
+  if (!opts.dryRun) {
+    const freshFingerprints = new Set<string>();
+    for (const rule of aggregated) {
+      for (const page of rule.affectedPages) {
+        for (const node of page.nodes) {
+          const selector = node.target?.join(" ") ?? "unknown";
+          freshFingerprints.add(computeFingerprint(rule.ruleId, selector, page.url));
+        }
+      }
+    }
+    await verifyInReviewTickets(epicKey, freshFingerprints);
+  }
+
   if (aggregated.length === 0) {
     console.log("[triage] No violations found — nothing to triage");
     return {
-      epicKey: null,
+      epicKey,
       tickets: [],
       summary: { totalViolationTypes: 0, totalElements: 0, pagesScanned: pages.length, byIssueType: {}, byPriority: {} },
       dbSync: { ticketsCreated: 0, issuesCreated: 0 },
@@ -65,11 +152,6 @@ export async function triageFromReports(opts: {
   const classified = await classifyIssues(aggregated);
 
   const payloads = buildTicketPayloads(classified, LABEL_PREFIX, pages);
-
-  let epicKey: string | null = null;
-  if (opts.cycleId && !opts.dryRun) {
-    epicKey = await tracker.ensureEpic(opts.cycleId);
-  }
 
   let syntheticScanRunId: string | null = null;
   if (!opts.dryRun) {
@@ -174,10 +256,7 @@ export async function triageFromReports(opts: {
       for (const page of payload.classified.affectedPages) {
         for (const node of page.nodes) {
           const selector = node.target?.join(" ") ?? "unknown";
-          const fingerprint = crypto
-            .createHash("sha256")
-            .update(`${payload.classified.ruleId}:${selector}:${page.url}`)
-            .digest("hex");
+          const fingerprint = computeFingerprint(payload.classified.ruleId, selector, page.url);
 
           try {
             const [inserted] = await db

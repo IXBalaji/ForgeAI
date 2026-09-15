@@ -19,6 +19,7 @@ export function ResultsSummary({ status, onStartAnother }: ResultsSummaryProps) 
   const totalFixed = result.fixed.length;
   const totalParked = result.parked.length;
   const totalFlagged = result.flagged.length;
+  const totalOpen = result.open.length;
 
   const handleStartAnother = () => {
     setIsStarting(true);
@@ -47,6 +48,10 @@ export function ResultsSummary({ status, onStartAnother }: ResultsSummaryProps) 
         <div className="result-card result-flagged">
           <div className="result-count">{totalFlagged}</div>
           <div className="result-label">Flagged</div>
+        </div>
+        <div className="result-card result-open">
+          <div className="result-count">{totalOpen}</div>
+          <div className="result-label">Open</div>
         </div>
       </div>
 
@@ -81,6 +86,19 @@ export function ResultsSummary({ status, onStartAnother }: ResultsSummaryProps) 
           <summary>Flagged tickets ({result.flagged.length})</summary>
           <ul>
             {result.flagged.map((ticket) => (
+              <li key={ticket.id}>
+                {ticket.jiraKey || ticket.id} — {ticket.category}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {result.open.length > 0 && (
+        <details className="result-details" open={totalFixed === 0 && totalParked === 0 && totalFlagged === 0}>
+          <summary>Open tickets awaiting a fix ({result.open.length})</summary>
+          <ul>
+            {result.open.map((ticket) => (
               <li key={ticket.id}>
                 {ticket.jiraKey || ticket.id} — {ticket.category}
               </li>

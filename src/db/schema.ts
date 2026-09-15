@@ -105,6 +105,10 @@ export const iterationCycles = pgTable("iteration_cycles", {
   // than created fresh each time — see integrations/jira.ts's ensureEpic().
   epicKey: text("epic_key"),
   openIssueCount: integer("open_issue_count").notNull().default(0),
+  // Run depth, chosen at start time: "scan" (report only), "triage" (scan +
+  // ticket creation, no fixing), "full" (today's complete autonomous
+  // pipeline). Defaults to "full" so pre-existing rows/tests are unaffected.
+  mode: text("mode").notNull().default("full"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
 });

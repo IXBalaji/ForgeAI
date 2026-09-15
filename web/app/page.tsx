@@ -175,6 +175,8 @@ export default function Home() {
           stageDetail={status.stageDetail}
           logsByStage={status.logsByStage}
           failed={status.failed}
+          mode={status.mode}
+          loopIterationHint={status.loopIterationHint}
         />
         <div className="stats-grid">
           <div className="stat">
@@ -220,6 +222,7 @@ export default function Home() {
           logsByStage={status.logsByStage}
           failed={status.failed}
           allCompleted={!status.failed}
+          mode={status.mode}
         />
         <div className="stats-grid">
           <div className="stat">

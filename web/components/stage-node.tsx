@@ -23,6 +23,7 @@ export function StageNode({
     "autofix",
     "deploy",
     "cleanup",
+    "verify",
     "release",
   ];
 

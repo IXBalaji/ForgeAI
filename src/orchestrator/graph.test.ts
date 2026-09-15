@@ -53,34 +53,67 @@ describe("routeAfterTriage", () => {
     vi.resetModules();
   });
 
-  it("returns release when triage found no violations", async () => {
-    const { routeAfterTriage } = await import("./graph.js");
-
-    expect(routeAfterTriage({ cycleNumber: 0, triageFoundIssues: false } as any)).toBe("release");
-    expect(routeAfterTriage({ cycleNumber: 0, triageFoundIssues: true } as any)).toBe("preProcessEmail");
-  });
-});
-
-describe("routeAfterCleanup", () => {
-  beforeEach(() => {
-    vi.resetModules();
-  });
-
-  it("releases once every ticket tied to this cycle's epic is done/parked/flagged", async () => {
+  it("returns release once every ticket tied to this cycle's epic is done/parked/flagged", async () => {
     vi.doMock("../db/client.js", () => ({
       db: { select: () => ({ from: () => ({ where: () => Promise.resolve([]) }) }) },
     }));
-    const { routeAfterCleanup } = await import("./graph.js");
-    const result = await routeAfterCleanup({ cycleId: "cycle-1", epicKey: "EPIC-1" } as any);
+    const { routeAfterTriage } = await import("./graph.js");
+    const result = await routeAfterTriage({ cycleId: "cycle-1", cycleNumber: 0, epicKey: "EPIC-1" } as any);
     expect(result).toBe("release");
   });
 
-  it("re-scans instead of releasing while this cycle still has unresolved tickets", async () => {
+  it("continues fixing while this cycle still has unresolved (open/in_review) tickets", async () => {
     vi.doMock("../db/client.js", () => ({
       db: { select: () => ({ from: () => ({ where: () => Promise.resolve([{ id: "t1" }]) }) }) },
     }));
-    const { routeAfterCleanup } = await import("./graph.js");
-    const result = await routeAfterCleanup({ cycleId: "cycle-1", epicKey: "EPIC-1" } as any);
-    expect(result).toBe("scan");
+    const { routeAfterTriage } = await import("./graph.js");
+    const result = await routeAfterTriage({ cycleId: "cycle-1", cycleNumber: 0, epicKey: "EPIC-1" } as any);
+    expect(result).toBe("preProcessEmail");
+  });
+
+  it("releases once MAX_CYCLES is reached regardless of unresolved tickets", async () => {
+    vi.doMock("../db/client.js", () => ({
+      db: { select: () => ({ from: () => ({ where: () => Promise.resolve([{ id: "t1" }]) }) }) },
+    }));
+    const { routeAfterTriage } = await import("./graph.js");
+    const result = await routeAfterTriage({ cycleId: "cycle-1", cycleNumber: 20, epicKey: "EPIC-1" } as any);
+    expect(result).toBe("release");
+  });
+
+  it("stops at preProcessEmail for 'triage' mode even when every ticket is already resolved", async () => {
+    // Simulates the edge case where this triage pass found zero new
+    // violations and every ticket happens to already be "done" from an
+    // earlier full-mode run — triage mode must never fall through to release.
+    vi.doMock("../db/client.js", () => ({
+      db: { select: () => ({ from: () => ({ where: () => Promise.resolve([]) }) }) },
+    }));
+    const { routeAfterTriage } = await import("./graph.js");
+    const result = await routeAfterTriage({ cycleId: "cycle-1", cycleNumber: 0, mode: "triage", epicKey: "EPIC-1" } as any);
+    expect(result).toBe("preProcessEmail");
+  });
+});
+
+describe("routeAfterScan", () => {
+  it("stops at 'finish' for 'scan' mode", async () => {
+    const { routeAfterScan } = await import("./graph.js");
+    expect(routeAfterScan({ mode: "scan" } as any)).toBe("finish");
+  });
+
+  it("continues to triage for 'triage' and 'full' modes", async () => {
+    const { routeAfterScan } = await import("./graph.js");
+    expect(routeAfterScan({ mode: "triage" } as any)).toBe("triage");
+    expect(routeAfterScan({ mode: "full" } as any)).toBe("triage");
+  });
+});
+
+describe("routeAfterPreProcessEmail", () => {
+  it("stops at 'finish' for 'triage' mode (no fixing attempted)", async () => {
+    const { routeAfterPreProcessEmail } = await import("./graph.js");
+    expect(routeAfterPreProcessEmail({ mode: "triage" } as any)).toBe("finish");
+  });
+
+  it("continues to prepareBranch for 'full' mode", async () => {
+    const { routeAfterPreProcessEmail } = await import("./graph.js");
+    expect(routeAfterPreProcessEmail({ mode: "full" } as any)).toBe("prepareBranch");
   });
 });

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { ConfirmationDialog } from "./confirmation-dialog";
+import type { RunMode } from "@/lib/types";
 
 interface StartWorkflowButtonProps {
   onStartSuccess: (cycleId: string) => void;
@@ -14,6 +15,7 @@ export function StartWorkflowButton({
 }: StartWorkflowButtonProps) {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [mode, setMode] = useState<RunMode>("full");
 
   const handleClick = () => {
     setIsDialogOpen(true);
@@ -29,6 +31,8 @@ export function StartWorkflowButton({
     try {
       const response = await fetch("/api/workflow/start", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode }),
       });
 
       if (response.status === 409) {
@@ -75,6 +79,8 @@ export function StartWorkflowButton({
       </button>
       <ConfirmationDialog
         isOpen={isDialogOpen}
+        mode={mode}
+        onModeChange={setMode}
         onCancel={handleCancel}
         onConfirm={handleConfirm}
         isStarting={isStarting}

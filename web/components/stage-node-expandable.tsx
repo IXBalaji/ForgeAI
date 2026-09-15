@@ -17,6 +17,7 @@ const STAGE_LABELS: Record<Stage, string> = {
   autofix: "Auto-fix",
   deploy: "Deploy",
   cleanup: "Cleanup",
+  verify: "Verify",
   release: "Release",
   unknown: "Unknown",
 };

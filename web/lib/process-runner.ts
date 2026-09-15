@@ -18,7 +18,7 @@ import { registerActiveRun, clearActiveRun, getLogFilePath } from "./run-registr
  *
  * Returns the PID of the spawned child process.
  */
-export async function spawnOrchestrator(cycleId: string): Promise<number> {
+export async function spawnOrchestrator(cycleId: string, mode: "scan" | "triage" | "full" = "full"): Promise<number> {
   const repoRoot =
     process.env.ORCHESTRATOR_REPO_ROOT || resolve(process.cwd(), "..");
   const cliPath = join(repoRoot, "src", "cli", "index.ts");
@@ -29,7 +29,9 @@ export async function spawnOrchestrator(cycleId: string): Promise<number> {
 
   // Spawn the child process
   // - Use tsx to run TypeScript directly (same approach as npm run pipeline)
-  // - Pass --cycle-id so the orchestrator reuses our pre-inserted row
+  // - Pass --cycle-id so the orchestrator reuses our pre-inserted row (which
+  //   already carries the requested mode — --mode is passed too for CLI
+  //   parity, but the DB row is the source of truth once it exists)
   // - detached: true + unref() lets it survive parent exit on Windows
   const child: ChildProcess = spawn(
     process.execPath,
@@ -39,6 +41,8 @@ export async function spawnOrchestrator(cycleId: string): Promise<number> {
       "orchestrate",
       "--cycle-id",
       cycleId,
+      "--mode",
+      mode,
     ],
     {
       cwd: repoRoot,

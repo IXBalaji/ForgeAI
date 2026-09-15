@@ -58,6 +58,36 @@ export interface DeployResult {
   tag: string | null;
 }
 
+/**
+ * Confirms a ticket's fix actually resolved the issue, once the post-deploy
+ * verification scan/triage pass finds none of its original fingerprints
+ * still reproducing (see triage-from-reports.ts's verifyInReviewTickets).
+ * This is the only place a ticket is marked "done" — merging to qa no longer
+ * does this, since a merge alone doesn't prove the live site is fixed.
+ */
+export async function confirmTicketFixed(ticketId: string): Promise<void> {
+  const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+  if (!ticket) return;
+
+  await db.update(tickets).set({ status: "done" }).where(eq(tickets.id, ticketId));
+
+  if (ticket.jiraKey) {
+    const [latestAttempt] = await db
+      .select()
+      .from(fixAttempts)
+      .where(eq(fixAttempts.ticketId, ticketId))
+      .orderBy(desc(fixAttempts.createdAt))
+      .limit(1);
+    await postResolutionComment(ticket.jiraKey, {
+      branch: latestAttempt?.branch ?? "unknown",
+      commitSha: null,
+      tag: null,
+      ticketId,
+    });
+    await tracker.transitionTicket(ticket.jiraKey, "Done");
+  }
+}
+
 export interface BranchDeployResult {
   deploymentId: string | null;
   commitSha: string | null;
@@ -68,15 +98,14 @@ export interface BranchDeployResult {
 }
 
 /**
- * Ordered pre-merge validation checklist enforcing the 5 blocking conditions:
- * failing tests, unresolved blocking review comments, missing approval, merge
- * conflicts, and unmet acceptance criteria (folded into the blocking-findings
- * check, since an unmet-AC finding is itself a blocking finding).
+ * Pre-merge validation: the branch's latest review must have approved with
+ * no unresolved blocking findings (which folds in unmet acceptance criteria,
+ * since an unmet-AC finding is itself a blocking finding). There's no PR to
+ * check approval/mergeability against anymore — merge conflicts are instead
+ * discovered (and retried once) when the direct branch merge is attempted.
  */
 async function checkMergeReadiness(
-  branch: string,
   ticketIds: string[],
-  prNumber: number,
 ): Promise<{ ready: true } | { ready: false; reason: string }> {
   const attempts = await db.select().from(fixAttempts).where(inArray(fixAttempts.ticketId, ticketIds));
   const attemptIds = attempts.map((a) => a.id);
@@ -92,35 +121,12 @@ async function checkMergeReadiness(
     latestReview = reviews[0];
   }
 
-  // 1. Tests passed (defense-in-depth re-check of the stored review verdict).
   if (!latestReview || latestReview.verdict !== "approved") {
     return { ready: false, reason: `Tests/review not in an approved state (verdict: ${latestReview?.verdict ?? "none"}).` };
   }
 
-  // 2 & 5. No unresolved blocking findings (folds in unmet acceptance criteria).
   if ((latestReview.blockingFindingsCount ?? 0) > 0) {
     return { ready: false, reason: `${latestReview.blockingFindingsCount} unresolved blocking review finding(s).` };
-  }
-
-  // 3. GitHub-side approval present.
-  const status = await vcs.getPullRequestStatus(prNumber);
-  if (!status) {
-    return { ready: false, reason: "Could not retrieve PR status from GitHub." };
-  }
-  if (status.merged) {
-    return { ready: true };
-  }
-  // GitHub refuses to let an identity approve its own PR, so when the PR author
-  // is the same account as the API token, a GitHub-side APPROVED review can
-  // never exist. Fall back to the internal review verdict (already checked
-  // above) as the authoritative approval signal in that case.
-  if (!status.selfAuthored && status.reviewState !== "APPROVED") {
-    return { ready: false, reason: `PR review state is "${status.reviewState}", not APPROVED.` };
-  }
-
-  // 4. No merge conflicts.
-  if (status.mergeable === false) {
-    return { ready: false, reason: `PR #${prNumber} has merge conflicts (mergeable_state: ${status.mergeableState}).` };
   }
 
   return { ready: true };
@@ -245,11 +251,13 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
 }
 
 /**
- * Merge an approved, PR-gated shared branch containing fixes for multiple
- * tickets into QA. Runs the 5-point pre-merge checklist before merging via
- * the PR (not a direct branch merge); all tickets are marked "done" on
- * success. On any checklist failure, the PR is left open ("blocked") rather
- * than merged or closed.
+ * Merge a reviewed shared branch containing fixes for multiple tickets
+ * directly into QA (no PR — reviewer-agent.ts's reviewBranch already reviews
+ * the branch diff without needing one). Runs the pre-merge checklist first;
+ * on a conflict, brings the branch up to date from QA and retries once.
+ * Tickets stay "in_review" on success — merging alone doesn't prove the live
+ * site is fixed, so "done" is only set once the post-deploy verification
+ * scan confirms it (see triage-from-reports.ts).
  */
 export const deployBranch = traceable(_deployBranch, {
   name: "deploy.merge_branch",
@@ -260,8 +268,6 @@ export const deployBranch = traceable(_deployBranch, {
 async function _deployBranch(
   branch: string,
   ticketIds: string[],
-  prNumber: number,
-  prUrl: string | null = null,
   cycleId?: string,
 ): Promise<BranchDeployResult> {
   const allTickets = await db.select().from(tickets).where(
@@ -270,54 +276,44 @@ async function _deployBranch(
   const jiraKeys = allTickets.map((t) => t.jiraKey).filter(Boolean);
   const jiraRef = jiraKeys.length > 0 ? ` [${jiraKeys.join(", ")}]` : "";
 
-  // Idempotency: if this PR was already merged (e.g. crash after a successful
-  // merge but before the deployments row was written), skip straight to
-  // ticket/Jira bookkeeping instead of attempting a second merge.
-  const preStatus = await vcs.getPullRequestStatus(prNumber);
-  let commitSha: string | null = preStatus?.merged ? preStatus.headSha : null;
-
-  if (!preStatus?.merged) {
-    const readiness = await checkMergeReadiness(branch, ticketIds, prNumber);
-    if (!readiness.ready) {
-      console.warn(`[deploy] PR #${prNumber} (${branch}) not ready to merge — ${readiness.reason}`);
-      try {
-        await vcs.requestChanges(prNumber, `Merge blocked: ${readiness.reason}`);
-      } catch { /* best-effort — PR may already be in Changes Requested state */ }
-      if (cycleId) {
-        await logAudit({
-          cycleId,
-          action: "pr.merge_blocked",
-          actor: "deploy",
-          entityType: "pull_request",
-          entityId: String(prNumber),
-          details: { branch, reason: readiness.reason },
-          status: "failure",
-        });
-      }
-      const [deployment] = await db
-        .insert(deployments)
-        .values({ env: QA_BRANCH, commitSha: "none", tag: null, prNumber, prUrl, status: "blocked" })
-        .returning();
-      return { deploymentId: deployment.id, commitSha: null, tag: null, ticketsDeployed: 0, status: "blocked", blockReason: readiness.reason };
+  const readiness = await checkMergeReadiness(ticketIds);
+  if (!readiness.ready) {
+    console.warn(`[deploy] Branch ${branch}${jiraRef} not ready to merge — ${readiness.reason}`);
+    if (cycleId) {
+      await logAudit({
+        cycleId,
+        action: "branch.merge_blocked",
+        actor: "deploy",
+        entityType: "branch",
+        entityId: branch,
+        details: { reason: readiness.reason },
+        status: "failure",
+      });
     }
+    const [deployment] = await db
+      .insert(deployments)
+      .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "blocked" })
+      .returning();
+    return { deploymentId: deployment.id, commitSha: null, tag: null, ticketsDeployed: 0, status: "blocked", blockReason: readiness.reason };
+  }
 
-    try {
-      commitSha = await vcs.mergePullRequest(prNumber, "merge");
-    } catch (err) {
-      const errMsg = (err as Error).message;
-      const isConflict = vcs.isConflictError(err as Error);
+  let commitSha: string | null = null;
+  try {
+    commitSha = await vcs.mergeBranch(branch, QA_BRANCH, `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${branch} into ${QA_BRANCH}`);
+  } catch (err) {
+    const errMsg = (err as Error).message;
+    const isConflict = vcs.isConflictError(err as Error);
 
-      if (isConflict) {
-        console.warn(`[deploy] Merge conflict for PR #${prNumber} (${branch}) — updating branch from ${QA_BRANCH} and retrying once...`);
-        try {
-          await vcs.updateBranchFromBase(branch, QA_BRANCH);
-          commitSha = await vcs.mergePullRequest(prNumber, "merge");
-        } catch (resolveErr) {
-          console.error(`[deploy] Conflict resolution failed: ${(resolveErr as Error).message}`);
-        }
-      } else {
-        console.error(`[deploy] Merge failed for PR #${prNumber} (${branch}): ${errMsg}`);
+    if (isConflict) {
+      console.warn(`[deploy] Merge conflict for ${branch}${jiraRef} — updating branch from ${QA_BRANCH} and retrying once...`);
+      try {
+        await vcs.updateBranchFromBase(branch, QA_BRANCH);
+        commitSha = await vcs.mergeBranch(branch, QA_BRANCH, `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${branch} into ${QA_BRANCH} (conflicts resolved)`);
+      } catch (resolveErr) {
+        console.error(`[deploy] Conflict resolution failed: ${(resolveErr as Error).message}`);
       }
+    } else {
+      console.error(`[deploy] Merge failed for ${branch}${jiraRef}: ${errMsg}`);
     }
   }
 
@@ -329,23 +325,22 @@ async function _deployBranch(
     if (cycleId) {
       await logAudit({
         cycleId,
-        action: "pr.merge_failed",
+        action: "branch.merge_failed",
         actor: "deploy",
-        entityType: "pull_request",
-        entityId: String(prNumber),
-        details: { branch },
+        entityType: "branch",
+        entityId: branch,
+        details: {},
         status: "failure",
       });
     }
     const [deployment] = await db
       .insert(deployments)
-      .values({ env: QA_BRANCH, commitSha: "none", tag: null, prNumber, prUrl, status: "failed" })
+      .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
       .returning();
     return { deploymentId: deployment.id, commitSha: null, tag: null, ticketsDeployed: 0, status: "failed" };
   }
 
-  let tag: string | null = null;
-  tag = `${LABEL_PREFIX_SLUG}-${QA_BRANCH}-${commitSha.slice(0, 7)}`;
+  const tag = `${LABEL_PREFIX_SLUG}-${QA_BRANCH}-${commitSha.slice(0, 7)}`;
   await vcs.createTag(tag, commitSha);
 
   const [deployment] = await db
@@ -354,39 +349,35 @@ async function _deployBranch(
       env: QA_BRANCH,
       commitSha,
       tag,
-      prNumber,
-      prUrl,
       status: "succeeded",
     })
     .returning();
 
-  for (const t of allTickets) {
-    await db.update(tickets).set({ status: "done" }).where(eq(tickets.id, t.id));
-    if (t.jiraKey) {
-      await postResolutionComment(t.jiraKey, {
-        branch,
-        commitSha,
-        prUrl,
-        mergeMethod: "merge",
-        tag,
-        ticketId: t.id,
-      });
-      await tracker.transitionTicket(t.jiraKey, "Done");
-    }
-  }
-
   if (cycleId) {
     await logAudit({
       cycleId,
-      action: "pr.merged",
+      action: "branch.merged",
       actor: "deploy",
-      entityType: "pull_request",
-      entityId: String(prNumber),
-      details: { branch, commitSha, tag, ticketsDeployed: allTickets.length },
+      entityType: "branch",
+      entityId: branch,
+      details: { commitSha, tag, ticketsDeployed: allTickets.length },
       status: "success",
     });
   }
 
-  console.log(`[deploy] Merged PR #${prNumber} (${branch}) — ${allTickets.length} ticket(s) deployed.`);
+  // Merged and awaiting the post-deploy verification scan — reflect that on
+  // the tracker so a ticket doesn't sit visibly "In Progress" all the way
+  // through to "Done" with no indication it's mid-verification.
+  for (const t of allTickets) {
+    if (t.jiraKey) {
+      try {
+        await tracker.transitionTicket(t.jiraKey, "In Review");
+      } catch (err) {
+        console.warn(`[deploy] Failed to transition ${t.jiraKey} to In Review:`, (err as Error).message?.slice(0, 200));
+      }
+    }
+  }
+
+  console.log(`[deploy] Merged ${branch} into ${QA_BRANCH} — ${allTickets.length} ticket(s) awaiting live verification.`);
   return { deploymentId: deployment.id, commitSha, tag, ticketsDeployed: allTickets.length, status: "succeeded" };
 }

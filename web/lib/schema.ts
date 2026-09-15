@@ -100,6 +100,7 @@ export const iterationCycles = pgTable("iteration_cycles", {
   scanRunId: text("scan_run_id").references(() => scanRuns.id),
   epicKey: text("epic_key"),
   openIssueCount: integer("open_issue_count").notNull().default(0),
+  mode: text("mode").notNull().default("full"),
   startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp("ended_at", { withTimezone: true }),
 });

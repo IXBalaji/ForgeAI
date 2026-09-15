@@ -261,11 +261,13 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
 }
 
 /**
- * Review all changes on a shared branch at once, against a PR. The worktree
- * already exists and contains all ticket fixes as separate commits. Runs
- * scope guard, build/lint/test gate, and adversarial review on the full diff,
- * then posts line-level comments for every finding to the PR (both
- * severities) — only "blocking" findings gate the verdict.
+ * Review all changes on a shared branch at once. The worktree already exists
+ * and contains all ticket fixes as separate commits. Runs scope guard,
+ * build/lint/test gate, and adversarial review on the full diff. When a PR
+ * exists (prNumber != null) findings are posted as line-level PR comments;
+ * otherwise (the normal direct-to-qa flow) the findings summary is posted as
+ * a comment on each reviewed ticket instead. Only "blocking" findings gate
+ * the verdict.
  */
 export const reviewBranch = traceable(_reviewBranch, {
   name: "reviewer.review_branch",
@@ -360,6 +362,19 @@ async function _reviewBranch(
       blockingFindingsCount,
       prReviewId,
     });
+
+    // No PR to post findings to (the direct-to-qa flow) — comment on the
+    // ticket instead, so review findings stay visible without a PR trail.
+    if (prNumber == null) {
+      const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
+      if (ticket?.jiraKey) {
+        try {
+          await tracker.comment(ticket.jiraKey, `Review (${verdict}):\n${comments}`);
+        } catch (err) {
+          console.warn(`[reviewer] Failed to post review comment on ${ticket.jiraKey}:`, (err as Error).message?.slice(0, 200));
+        }
+      }
+    }
   }
 
   return { verdict, scopeGuardFlagged: guard.flagged, comments, findings, blockingFindingsCount, prReviewId };

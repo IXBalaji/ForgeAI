@@ -21,12 +21,25 @@ import { getActiveRun, clearActiveRun } from "@/lib/run-registry";
 import { spawnOrchestrator, spawnTestCommand } from "@/lib/process-runner";
 import type { StartResponse, ConflictResponse } from "@/lib/types";
 
+const VALID_MODES = ["scan", "triage", "full"] as const;
+type WorkflowMode = (typeof VALID_MODES)[number];
+
 export async function POST(request: Request) {
   if (!db) {
     return NextResponse.json(
       { error: "DATABASE_URL is required in the root .env file" },
       { status: 503 },
     );
+  }
+
+  let mode: WorkflowMode = "full";
+  try {
+    const body = await request.json();
+    if (body && VALID_MODES.includes(body.mode)) {
+      mode = body.mode;
+    }
+  } catch {
+    // No body (or invalid JSON) — default to "full" for backward compatibility.
   }
 
   const database = requireDb();
@@ -80,6 +93,7 @@ export async function POST(request: Request) {
     .values({
       cycleNumber: 0,
       openIssueCount: 0,
+      mode,
     })
     .returning();
 
@@ -100,7 +114,7 @@ export async function POST(request: Request) {
     if (useTestCommand && process.env.NODE_ENV !== "production") {
       pid = await spawnTestCommand(cycle.id);
     } else {
-      pid = await spawnOrchestrator(cycle.id);
+      pid = await spawnOrchestrator(cycle.id, mode);
     }
   } catch (err: unknown) {
     console.error("[start] Failed to spawn orchestrator:", err);

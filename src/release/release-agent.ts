@@ -13,7 +13,13 @@ import {
 } from "../integrations/report-template.js";
 import { generateFinalReport } from "./final-report.js";
 import { LABEL_PREFIX } from "../lib/config.js";
+import { getVcsProvider } from "../integrations/vcs/factory.js";
 import type { ReleaseReport } from "../types/index.js";
+
+const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
+const MAIN_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "main";
+
+const vcs = getVcsProvider();
 
 /**
  * Release agent — compiles fixed/parked/flagged into the post-process report
@@ -49,7 +55,8 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
 
   await notifySlack(summaryLine);
 
-  // Most recent deployment/PR for this cycle window, if any.
+  // Most recent deployment for this cycle window, if any (no PR — qa merges
+  // are direct git merges now; see deploy-agent.ts).
   const [latestDeployment] = cycle
     ? await db
         .select()
@@ -58,6 +65,38 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
         .orderBy(desc(deployments.deployedAt))
         .limit(1)
     : [];
+
+  // Open (idempotent) a PR promoting the verified fixes from qa into main —
+  // this is the one remaining human gate: nothing merges to production
+  // without someone reviewing and merging this PR themselves.
+  let releasePr: { number: number; htmlUrl: string } | null = null;
+  if (doneTickets.length > 0) {
+    const jiraKeys = doneTickets.map((t) => t.jiraKey).filter((k): k is string => Boolean(k));
+    releasePr = await vcs.findOpenPullRequest(QA_BRANCH, MAIN_BRANCH);
+    if (!releasePr) {
+      const title = `[${LABEL_PREFIX}] Release: ${doneTickets.length} accessibility fix(es) — cycle ${cycleId}`;
+      const bodyLines = [
+        `Automated accessibility remediation ready for release — ${doneTickets.length} ticket(s) verified fixed on \`${QA_BRANCH}\`.`,
+        "",
+        ...jiraKeys.map((k) => `- ${k}`),
+      ];
+      releasePr = await vcs.createPullRequest(QA_BRANCH, MAIN_BRANCH, title, bodyLines.join("\n"));
+      console.log(`[release] Created release PR ${releasePr?.htmlUrl ?? "(vcs not configured)"} (${QA_BRANCH} → ${MAIN_BRANCH}).`);
+    } else {
+      console.log(`[release] Reusing existing open release PR #${releasePr.number} (${QA_BRANCH} → ${MAIN_BRANCH}).`);
+    }
+    if (releasePr) {
+      await logAudit({
+        cycleId,
+        action: "release.pr_created",
+        actor: "orchestrator",
+        entityType: "pull_request",
+        entityId: String(releasePr.number),
+        details: { ticketCount: doneTickets.length },
+        status: "success",
+      });
+    }
+  }
 
   // Latest review's blocking findings for parked/flagged tickets (remaining blockers).
   const blockerTickets = [...parkedTickets, ...flaggedTickets];
@@ -88,16 +127,16 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
       category: t.category,
       status: t.status,
     })),
-    prUrl: latestDeployment?.prUrl ?? null,
-    prNumber: latestDeployment?.prNumber ?? null,
-    mergeStatus: latestDeployment?.status ?? null,
-    testSummary: `${doneTickets.length} ticket(s) merged this cycle across ${latestDeployment ? 1 : 0} pull request(s).`,
+    prUrl: releasePr?.htmlUrl ?? null,
+    prNumber: releasePr?.number ?? null,
+    mergeStatus: releasePr ? "open — awaiting review" : null,
+    testSummary: `${doneTickets.length} ticket(s) merged to ${QA_BRANCH} this cycle${latestDeployment ? ` (last deploy: ${latestDeployment.status})` : ""}.`,
     remainingBlockers,
   };
 
   const report: ReleaseReport = {
     cycleId,
-    prUrl: latestDeployment?.prUrl ?? null,
+    prUrl: releasePr?.htmlUrl ?? null,
     fixedTicketIds: doneTickets.map((t) => t.id),
     parkedTicketIds: parkedTickets.map((t) => t.id),
     flaggedTicketIds: flaggedTickets.map((t) => t.id),

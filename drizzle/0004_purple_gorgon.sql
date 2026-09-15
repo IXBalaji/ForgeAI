@@ -1,0 +1,1 @@
+ALTER TABLE "iteration_cycles" ADD COLUMN "mode" text DEFAULT 'full' NOT NULL;

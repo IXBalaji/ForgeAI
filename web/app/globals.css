@@ -278,6 +278,46 @@ body {
   margin-bottom: var(--space-3);
 }
 
+.mode-picker {
+  border: none;
+  padding: 0;
+  margin: 0 0 var(--space-4) 0;
+}
+
+.mode-picker legend {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-2);
+}
+
+.mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-2);
+  cursor: pointer;
+}
+
+.mode-option:has(input:checked) {
+  border-color: var(--color-accent-border);
+  background-color: var(--color-accent-bg);
+}
+
+.mode-option input {
+  margin-top: 3px;
+}
+
+.mode-option-description {
+  font-size: 0.813rem;
+  color: var(--color-text-muted);
+}
+
 .side-effects-list {
   list-style: none;
   margin: var(--space-4) 0;
@@ -344,6 +384,11 @@ body {
   font-family: var(--font-mono);
   color: var(--color-accent);
   font-weight: 600;
+}
+
+.stage-cycle-badge {
+  background-color: var(--color-warning-bg);
+  border-color: var(--color-warning);
 }
 
 .stage-list {
@@ -662,12 +707,18 @@ body {
 
 .results-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: var(--space-4);
   margin-bottom: var(--space-6);
 }
 
-@media (max-width: 500px) {
+@media (max-width: 650px) {
+  .results-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 380px) {
   .results-grid {
     grid-template-columns: 1fr;
   }
@@ -697,6 +748,11 @@ body {
   background-color: var(--color-error-bg);
 }
 
+.result-card.result-open {
+  border-color: var(--color-border-subtle);
+  background-color: var(--color-surface-raised);
+}
+
 .result-count {
   font-size: 2.25rem;
   font-weight: 800;
@@ -714,6 +770,10 @@ body {
 
 .result-flagged .result-count {
   color: var(--color-error);
+}
+
+.result-open .result-count {
+  color: var(--color-text-secondary);
 }
 
 .result-label {

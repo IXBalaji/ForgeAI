@@ -60,19 +60,17 @@ function buildFakeDb(state: FakeDbState) {
   };
 }
 
-describe("deployBranch pre-merge checklist", () => {
+describe("deployBranch pre-merge checklist (direct-to-qa, no PR)", () => {
   let vcsMock: any;
   let trackerMock: any;
 
   beforeEach(() => {
     vi.resetModules();
     vcsMock = {
-      getPullRequestStatus: vi.fn(),
-      mergePullRequest: vi.fn(),
+      mergeBranch: vi.fn(),
       updateBranchFromBase: vi.fn(),
       isConflictError: () => false,
       createTag: vi.fn().mockResolvedValue("tag-1"),
-      requestChanges: vi.fn(),
     };
     trackerMock = { transitionTicket: vi.fn(), comment: vi.fn() };
     vi.doMock("../integrations/vcs/factory.js", () => ({ getVcsProvider: () => vcsMock }));
@@ -90,16 +88,14 @@ describe("deployBranch pre-merge checklist", () => {
     vi.doMock("../db/client.js", () => ({ db: buildFakeDb(state) }));
 
     const { deployBranch } = await import("./deploy-agent.js");
-    const result = await deployBranch("branch-1", ["t1"], 10, "https://github.com/o/r/pull/10", "cycle-1");
+    const result = await deployBranch("branch-1", ["t1"], "cycle-1");
 
     expect(result.status).toBe("blocked");
-    expect(vcsMock.mergePullRequest).not.toHaveBeenCalled();
+    expect(vcsMock.mergeBranch).not.toHaveBeenCalled();
   });
 
   it("blocks the merge when blocking findings remain", async () => {
     const state: any = {
-      ticketRowsTable: {},
-      fixAttemptRowsTable: {},
       ticketRows: [{ id: "t1", jiraKey: "AB-1" }],
       fixAttemptRows: [{ id: "fa1", ticketId: "t1" }],
       reviewRows: [{ verdict: "approved", blockingFindingsCount: 2, resolvedIssueIds: [], comments: "" }],
@@ -109,16 +105,15 @@ describe("deployBranch pre-merge checklist", () => {
     vi.doMock("../db/client.js", () => ({ db: buildFakeDb(state) }));
 
     const { deployBranch } = await import("./deploy-agent.js");
-    const result = await deployBranch("branch-1", ["t1"], 10, null, "cycle-1");
+    const result = await deployBranch("branch-1", ["t1"], "cycle-1");
 
     expect(result.status).toBe("blocked");
     expect(result.blockReason).toMatch(/blocking/i);
+    expect(vcsMock.mergeBranch).not.toHaveBeenCalled();
   });
 
-  it("blocks the merge when GitHub review state is not APPROVED", async () => {
+  it("merges directly into qa when the checklist is clear", async () => {
     const state: any = {
-      ticketRowsTable: {},
-      fixAttemptRowsTable: {},
       ticketRows: [{ id: "t1", jiraKey: "AB-1" }],
       fixAttemptRows: [{ id: "fa1", ticketId: "t1" }],
       reviewRows: [{ verdict: "approved", blockingFindingsCount: 0, resolvedIssueIds: [], comments: "" }],
@@ -126,61 +121,24 @@ describe("deployBranch pre-merge checklist", () => {
       inserted: [],
     };
     vi.doMock("../db/client.js", () => ({ db: buildFakeDb(state) }));
-    vcsMock.getPullRequestStatus.mockResolvedValue({ merged: false, reviewState: "CHANGES_REQUESTED", mergeable: true });
+    vcsMock.mergeBranch.mockResolvedValue("merged-sha-123");
 
     const { deployBranch } = await import("./deploy-agent.js");
-    const result = await deployBranch("branch-1", ["t1"], 10, null, "cycle-1");
-
-    expect(result.status).toBe("blocked");
-    expect(vcsMock.mergePullRequest).not.toHaveBeenCalled();
-  });
-
-  it("blocks the merge on conflicts", async () => {
-    const state: any = {
-      ticketRowsTable: {},
-      fixAttemptRowsTable: {},
-      ticketRows: [{ id: "t1", jiraKey: "AB-1" }],
-      fixAttemptRows: [{ id: "fa1", ticketId: "t1" }],
-      reviewRows: [{ verdict: "approved", blockingFindingsCount: 0, resolvedIssueIds: [], comments: "" }],
-      updates: [],
-      inserted: [],
-    };
-    vi.doMock("../db/client.js", () => ({ db: buildFakeDb(state) }));
-    vcsMock.getPullRequestStatus.mockResolvedValue({ merged: false, reviewState: "APPROVED", mergeable: false, mergeableState: "dirty" });
-
-    const { deployBranch } = await import("./deploy-agent.js");
-    const result = await deployBranch("branch-1", ["t1"], 10, null, "cycle-1");
-
-    expect(result.status).toBe("blocked");
-    expect(vcsMock.mergePullRequest).not.toHaveBeenCalled();
-  });
-
-  it("merges when all checklist conditions are clear", async () => {
-    const state: any = {
-      ticketRowsTable: {},
-      fixAttemptRowsTable: {},
-      ticketRows: [{ id: "t1", jiraKey: "AB-1" }],
-      fixAttemptRows: [{ id: "fa1", ticketId: "t1" }],
-      reviewRows: [{ verdict: "approved", blockingFindingsCount: 0, resolvedIssueIds: [], comments: "" }],
-      updates: [],
-      inserted: [],
-    };
-    vi.doMock("../db/client.js", () => ({ db: buildFakeDb(state) }));
-    vcsMock.getPullRequestStatus.mockResolvedValue({ merged: false, reviewState: "APPROVED", mergeable: true, mergeableState: "clean" });
-    vcsMock.mergePullRequest.mockResolvedValue("merged-sha-123");
-
-    const { deployBranch } = await import("./deploy-agent.js");
-    const result = await deployBranch("branch-1", ["t1"], 10, "https://github.com/o/r/pull/10", "cycle-1");
+    const result = await deployBranch("branch-1", ["t1"], "cycle-1");
 
     expect(result.status).toBe("succeeded");
     expect(result.commitSha).toBe("merged-sha-123");
-    expect(vcsMock.mergePullRequest).toHaveBeenCalledWith(10, "merge");
+    expect(vcsMock.mergeBranch).toHaveBeenCalledWith("branch-1", expect.any(String), expect.any(String));
+    // Tickets stay in whatever status they were — deployBranch itself never
+    // marks "done"; that only happens once the verification scan confirms it.
+    expect(state.updates.some((u: any) => u.values?.status === "done")).toBe(false);
+    // The tracker should reflect "awaiting verification" so a ticket isn't
+    // visibly stuck on "In Progress" all the way through to "Done".
+    expect(trackerMock.transitionTicket).toHaveBeenCalledWith("AB-1", "In Review");
   });
 
-  it("merges a self-authored PR without requiring a GitHub-side APPROVED review", async () => {
+  it("retries once via updateBranchFromBase on a merge conflict, then succeeds", async () => {
     const state: any = {
-      ticketRowsTable: {},
-      fixAttemptRowsTable: {},
       ticketRows: [{ id: "t1", jiraKey: "AB-1" }],
       fixAttemptRows: [{ id: "fa1", ticketId: "t1" }],
       reviewRows: [{ verdict: "approved", blockingFindingsCount: 0, resolvedIssueIds: [], comments: "" }],
@@ -188,22 +146,21 @@ describe("deployBranch pre-merge checklist", () => {
       inserted: [],
     };
     vi.doMock("../db/client.js", () => ({ db: buildFakeDb(state) }));
-    // GitHub refuses to record an APPROVED review when the PR author and the
-    // API token are the same identity — reviewState stays "NONE" forever.
-    vcsMock.getPullRequestStatus.mockResolvedValue({ merged: false, reviewState: "NONE", mergeable: true, mergeableState: "clean", selfAuthored: true });
-    vcsMock.mergePullRequest.mockResolvedValue("merged-sha-456");
+    vcsMock.isConflictError = () => true;
+    vcsMock.mergeBranch
+      .mockRejectedValueOnce(new Error("conflict"))
+      .mockResolvedValueOnce("merged-sha-456");
 
     const { deployBranch } = await import("./deploy-agent.js");
-    const result = await deployBranch("branch-1", ["t1"], 10, "https://github.com/o/r/pull/10", "cycle-1");
+    const result = await deployBranch("branch-1", ["t1"], "cycle-1");
 
+    expect(vcsMock.updateBranchFromBase).toHaveBeenCalledWith("branch-1", expect.any(String));
     expect(result.status).toBe("succeeded");
-    expect(vcsMock.mergePullRequest).toHaveBeenCalledWith(10, "merge");
+    expect(result.commitSha).toBe("merged-sha-456");
   });
 
-  it("skips re-merging when the PR was already merged (idempotent resume)", async () => {
+  it("reopens tickets and fails when the merge cannot be completed", async () => {
     const state: any = {
-      ticketRowsTable: {},
-      fixAttemptRowsTable: {},
       ticketRows: [{ id: "t1", jiraKey: "AB-1" }],
       fixAttemptRows: [{ id: "fa1", ticketId: "t1" }],
       reviewRows: [{ verdict: "approved", blockingFindingsCount: 0, resolvedIssueIds: [], comments: "" }],
@@ -211,12 +168,13 @@ describe("deployBranch pre-merge checklist", () => {
       inserted: [],
     };
     vi.doMock("../db/client.js", () => ({ db: buildFakeDb(state) }));
-    vcsMock.getPullRequestStatus.mockResolvedValue({ merged: true, headSha: "already-merged-sha" });
+    vcsMock.mergeBranch.mockRejectedValue(new Error("hard failure"));
 
     const { deployBranch } = await import("./deploy-agent.js");
-    const result = await deployBranch("branch-1", ["t1"], 10, null, "cycle-1");
+    const result = await deployBranch("branch-1", ["t1"], "cycle-1");
 
-    expect(result.status).toBe("succeeded");
-    expect(vcsMock.mergePullRequest).not.toHaveBeenCalled();
+    expect(result.status).toBe("failed");
+    expect(trackerMock.transitionTicket).toHaveBeenCalledWith("AB-1", "To Do");
+    expect(state.updates.some((u: any) => u.table === TICKETS_TABLE && u.values?.status === "open")).toBe(true);
   });
 });

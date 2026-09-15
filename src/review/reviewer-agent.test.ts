@@ -23,7 +23,9 @@ vi.mock("../db/client.js", () => ({
     update: vi.fn(() => ({ set: () => ({ where: () => Promise.resolve() }) })),
   },
 }));
-vi.mock("../db/schema.js", () => ({ fixAttempts: {}, tickets: {}, issues: {}, reviewResults: {} }));
+const FIX_ATTEMPTS_TABLE = { __name: "fix_attempts" };
+const TICKETS_TABLE = { __name: "tickets" };
+vi.mock("../db/schema.js", () => ({ fixAttempts: FIX_ATTEMPTS_TABLE, tickets: TICKETS_TABLE, issues: {}, reviewResults: {} }));
 vi.mock("../lib/exec.js", () => ({
   run: vi.fn().mockResolvedValue({ stdout: "src/a.ts\n", stderr: "" }),
 }));
@@ -120,5 +122,39 @@ describe("_reviewBranch (via reviewBranch)", () => {
     await reviewBranch("/worktree", ["ticket-1"], null);
 
     expect(addReviewCommentsMock).not.toHaveBeenCalled();
+  });
+
+  it("posts the review findings as a ticket comment when there is no PR number", async () => {
+    const { testGate } = await import("./test-gate.js");
+    vi.mocked(testGate).mockResolvedValue({ passed: true, output: "ok" } as any);
+    vi.doMock("./adversarial-review.js", () => ({ adversarialReview: vi.fn().mockResolvedValue([]) }));
+
+    let commentMock: ReturnType<typeof vi.fn>;
+    vi.doMock("../integrations/tracker/factory.js", () => {
+      commentMock = vi.fn();
+      return { getTrackerProvider: () => ({ transitionTicket: vi.fn(), comment: commentMock }) };
+    });
+
+    const { db } = await import("../db/client.js");
+    (db.select as any).mockImplementation(() => ({
+      from: (table: any) => ({
+        where: () => {
+          const rows =
+            table === FIX_ATTEMPTS_TABLE
+              ? [{ id: "fix-attempt-1", ticketId: "ticket-1", branch: "b1", createdAt: new Date() }]
+              : table === TICKETS_TABLE
+                ? [{ id: "ticket-1", jiraKey: "AB-1" }]
+                : [];
+          const thenable: any = Promise.resolve(rows);
+          thenable.orderBy = () => ({ limit: () => Promise.resolve(rows) });
+          return thenable;
+        },
+      }),
+    }));
+
+    const { reviewBranch } = await import("./reviewer-agent.js");
+    await reviewBranch("/worktree", ["ticket-1"], null);
+
+    expect(commentMock!).toHaveBeenCalledWith("AB-1", expect.stringContaining("Review (approved)"));
   });
 });

@@ -1,16 +1,27 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import type { RunMode } from "@/lib/types";
 
 interface ConfirmationDialogProps {
   isOpen: boolean;
+  mode: RunMode;
+  onModeChange: (mode: RunMode) => void;
   onCancel: () => void;
   onConfirm: () => void;
   isStarting: boolean;
 }
 
+const MODE_OPTIONS: Array<{ value: RunMode; label: string; description: string }> = [
+  { value: "scan", label: "Scan report", description: "Scan the site and generate the accessibility report only. No tickets, no fixes." },
+  { value: "triage", label: "Scan + triage", description: "Scan and create tickets for every issue found. Nothing gets fixed — tickets are left \"open\" for later." },
+  { value: "full", label: "Scan + triage + fix", description: "The complete autonomous pipeline: scan, triage, fix, review, deploy to QA, verify, and release." },
+];
+
 export function ConfirmationDialog({
   isOpen,
+  mode,
+  onModeChange,
   onCancel,
   onConfirm,
   isStarting,
@@ -69,30 +80,52 @@ export function ConfirmationDialog({
       <div className="dialog-content">
         <h2 id="dialog-title">Start Remediation Pipeline</h2>
         <div id="dialog-description" className="dialog-body">
-          <p>
-            ForgeAI will scan, triage, fix, review, and deploy accessibility
-            improvements for your application.
-          </p>
+          <fieldset className="mode-picker">
+            <legend>Run depth</legend>
+            {MODE_OPTIONS.map((option) => (
+              <label key={option.value} className="mode-option">
+                <input
+                  type="radio"
+                  name="run-mode"
+                  value={option.value}
+                  checked={mode === option.value}
+                  onChange={() => onModeChange(option.value)}
+                  disabled={isStarting}
+                />
+                <span>
+                  <strong>{option.label}</strong>
+                  <br />
+                  <span className="mode-option-description">{option.description}</span>
+                </span>
+              </label>
+            ))}
+          </fieldset>
           <ul className="side-effects-list">
             <li>
               <strong>Accessibility scan</strong> against{" "}
               <code>{targetUrl}</code>
             </li>
-            <li>
-              <strong>Ticket creation</strong> in project{" "}
-              <code>{projectKey}</code>
-            </li>
-            <li>
-              <strong>AI-powered fixes</strong> committed to{" "}
-              <code>{githubRepo}</code>
-            </li>
-            <li>
-              <strong>Automated code review</strong> and quality checks
-            </li>
-            <li>
-              <strong>Deploy to QA</strong> branch{" "}
-              <code>{qaBranch}</code>
-            </li>
+            {mode !== "scan" && (
+              <li>
+                <strong>Ticket creation</strong> in project{" "}
+                <code>{projectKey}</code>
+              </li>
+            )}
+            {mode === "full" && (
+              <>
+                <li>
+                  <strong>AI-powered fixes</strong> committed to{" "}
+                  <code>{githubRepo}</code>
+                </li>
+                <li>
+                  <strong>Automated code review</strong> and quality checks
+                </li>
+                <li>
+                  <strong>Deploy to QA</strong> branch{" "}
+                  <code>{qaBranch}</code>
+                </li>
+              </>
+            )}
           </ul>
         </div>
         <div className="dialog-actions">

@@ -6,11 +6,15 @@ export type Stage =
   | "autofix"
   | "deploy"
   | "cleanup"
+  | "verify"
   | "release"
   | "unknown";
 
+export type RunMode = "scan" | "triage" | "full";
+
 export interface RunStatus {
   cycleId: string;
+  mode: RunMode;
   startedAt: string;
   endedAt: string | null;
   stage: Stage;
@@ -36,6 +40,9 @@ export interface RunStatus {
     fixed: Array<{ id: string; jiraKey: string | null; category: string }>;
     parked: Array<{ id: string; jiraKey: string | null; category: string }>;
     flagged: Array<{ id: string; jiraKey: string | null; category: string }>;
+    // Tickets still awaiting a fix — the deliverable of "triage" mode, and
+    // also non-empty for a "full" run that hit MAX_CYCLES with work left.
+    open: Array<{ id: string; jiraKey: string | null; category: string }>;
     prUrl: string | null;
   } | null;
   logsByStage: Record<Stage, string[]>;
