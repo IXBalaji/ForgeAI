@@ -183,7 +183,7 @@ export async function triageFromReports(opts: {
       let [existingForJira] = await db
         .select()
         .from(ticketsTable)
-        .where(and(eq(ticketsTable.category, category), inArray(ticketsTable.status, ["open", "in_review"])));
+        .where(and(eq(ticketsTable.category, category), inArray(ticketsTable.status, ["open", "in_progress", "in_review"])));
 
       if (!existingForJira) {
         const [doneTicket] = await db
@@ -215,10 +215,16 @@ export async function triageFromReports(opts: {
           console.warn(`[triage] Failed to update ${jiraKey}: ${(err as Error).message}`);
         }
       } else {
-        const existingJiraKey = await tracker.findExisting({
-          summaryPrefix: `[${LABEL_PREFIX}] ${category}`,
+        let existingJiraKey = await tracker.findExisting({
+          summaryPrefix: `[${LABEL_PREFIX}] A11y: ${payload.classified.help}`,
           labels: payload.labels,
         });
+        if (!existingJiraKey) {
+          existingJiraKey = await tracker.findExisting({
+            summaryPrefix: `[${LABEL_PREFIX}] ${category}`,
+            labels: payload.labels,
+          });
+        }
 
         if (existingJiraKey) {
           jiraKey = existingJiraKey;
@@ -295,7 +301,7 @@ export async function triageFromReports(opts: {
       const [existingTicket] = await db
         .select()
         .from(ticketsTable)
-        .where(and(eq(ticketsTable.category, category), inArray(ticketsTable.status, ["open", "in_review"])));
+        .where(and(eq(ticketsTable.category, category), inArray(ticketsTable.status, ["open", "in_progress", "in_review"])));
 
       if (existingTicket) {
         const mergedIds = [...new Set([...(existingTicket.issueIds as string[]), ...issueIds])];

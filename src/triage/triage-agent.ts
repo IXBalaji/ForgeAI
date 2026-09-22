@@ -89,7 +89,7 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
     let [existing] = await db
       .select()
       .from(tickets)
-      .where(and(eq(tickets.category, category), inArray(tickets.status, ["open", "in_review"])));
+      .where(and(eq(tickets.category, category), inArray(tickets.status, ["open", "in_progress", "in_review"])));
 
     if (!existing) {
       const [doneTicket] = await db
