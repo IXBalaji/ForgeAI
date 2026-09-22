@@ -1,6 +1,6 @@
 import { db, requireDb } from "./db";
 import { iterationCycles, tickets, fixAttempts, reviewResults, deployments } from "./schema";
-import { eq, gte, and, inArray, desc } from "drizzle-orm";
+import { eq, or, gte, and, inArray, desc } from "drizzle-orm";
 import type { RunStatus, RunMode, Stage } from "./types";
 
 /**
@@ -33,10 +33,15 @@ export async function deriveRunStatus(
 
   // If the cycle is complete, surface the results
   if (endedAt) {
+    const epicKey = cycle.epicKey;
     const allTickets = await database
       .select()
       .from(tickets)
-      .where(gte(tickets.createdAt, cycle.startedAt));
+      .where(
+        epicKey
+          ? or(gte(tickets.createdAt, cycle.startedAt), eq(tickets.epicKey, epicKey))
+          : gte(tickets.createdAt, cycle.startedAt),
+      );
 
     const fixed = allTickets.filter((t) => t.status === "done");
     const parked = allTickets.filter((t) => t.status === "parked");
@@ -66,7 +71,7 @@ export async function deriveRunStatus(
       stage: completedStage,
       stageDetail: null,
       loopIterationHint: null,
-      counts: await deriveCounts(cycle.startedAt, database),
+      counts: await deriveCounts(cycle.startedAt, epicKey, database),
       recentLog: logLines.slice(-20),
       processAlive,
       failed: exitCode !== null && exitCode !== 0,
@@ -83,9 +88,10 @@ export async function deriveRunStatus(
   }
 
   // Still running — derive coarse stage from DB rows + log patterns
-  const stage = await deriveStageFromDB(cycle.startedAt, logLines, database);
+  const epicKey = cycle.epicKey;
+  const stage = await deriveStageFromDB(cycle.startedAt, epicKey, logLines, database);
   const stageDetail = parseStageDetailFromLog(logLines);
-  const counts = await deriveCounts(cycle.startedAt, database);
+  const counts = await deriveCounts(cycle.startedAt, epicKey, database);
   // Once a merge has happened this cycle, every subsequent deployment marks
   // the start of another fix→review→merge→verify pass — surface that as a
   // "cycle N" hint instead of leaving the timeline looking identical to the
@@ -111,13 +117,17 @@ export async function deriveRunStatus(
   };
 }
 
-async function deriveStageFromDB(startedAt: Date, logLines: string[], database: NonNullable<typeof db>): Promise<Stage> {
+async function deriveStageFromDB(startedAt: Date, epicKey: string | null, logLines: string[], database: NonNullable<typeof db>): Promise<Stage> {
   const logStage = inferStageFromLog(logLines);
 
   const ticketsCount = await database
     .select()
     .from(tickets)
-    .where(gte(tickets.createdAt, startedAt));
+    .where(
+      epicKey
+        ? or(gte(tickets.createdAt, startedAt), eq(tickets.epicKey, epicKey))
+        : gte(tickets.createdAt, startedAt),
+    );
 
   if (ticketsCount.length === 0) {
     return logStage ?? "scan";
@@ -191,8 +201,12 @@ function stageOrder(stage: Stage): number {
   return STAGE_ORDER[stage] ?? -1;
 }
 
-async function deriveCounts(startedAt: Date, database: NonNullable<typeof db>) {
-  const allTickets = await database.select().from(tickets).where(gte(tickets.createdAt, startedAt));
+async function deriveCounts(startedAt: Date, epicKey: string | null, database: NonNullable<typeof db>) {
+  const allTickets = await database.select().from(tickets).where(
+    epicKey
+      ? or(gte(tickets.createdAt, startedAt), eq(tickets.epicKey, epicKey))
+      : gte(tickets.createdAt, startedAt),
+  );
 
   const allAttempts = await database
     .select()

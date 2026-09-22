@@ -5,7 +5,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "ForgeAI — Autonomous WCAG Remediation",
   description:
-    "AI-powered accessibility remediation pipeline that scans, triages, fixes, reviews, and deploys WCAG improvements automatically.",
+    "AI-powered accessibility remediation pipeline that scans, classifies, fixes, reviews, and deploys WCAG improvements automatically.",
 };
 
 export default function RootLayout({

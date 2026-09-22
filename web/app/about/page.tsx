@@ -16,9 +16,9 @@ const PIPELINE_STAGES = [
   },
   {
     icon: "02",
-    title: "Triage",
+    title: "Classify",
     description:
-      "Detected violations are automatically categorized by severity and impact, then created as actionable tickets with reproduction steps and remediation guidance.",
+      "Detected violations are automatically classified by severity and impact, then created as actionable tickets with reproduction steps and remediation guidance.",
   },
   {
     icon: "03",
@@ -134,7 +134,7 @@ export default function AboutPage() {
         <div className="about-section__header" style={{ marginTop: "2rem" }}>
           <h2>The Solution</h2>
           <p>
-            ForgeAI replaces manual triage-fix-review cycles with an autonomous
+            ForgeAI replaces manual classify-fix-review cycles with an autonomous
             pipeline. AI agents scan your application, create tickets for every
             violation, write targeted code fixes, review each other&apos;s work, and
             deploy approved changes — all in a single automated run.

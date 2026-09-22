@@ -1,9 +1,9 @@
+"use client";
+
+import { useState } from "react";
 import { StageNodeExpandable } from "./stage-node-expandable";
 import type { RunMode, Stage } from "@/lib/types";
 
-// Each mode only ever visits a prefix of the full pipeline — showing the
-// unreached tail as "pending" would misrepresent a run that was never going
-// to fix anything in the first place.
 const STAGES_BY_MODE: Record<RunMode, Stage[]> = {
   scan: ["scan"],
   triage: ["scan", "triage"],
@@ -17,7 +17,6 @@ interface StageTimelineProps {
   failed: boolean;
   allCompleted?: boolean;
   mode?: RunMode;
-  /** "Cycle N" while looping back through fix→review→deploy→verify a 2nd+ time. */
   loopIterationHint?: number | null;
 }
 
@@ -31,10 +30,8 @@ export function StageTimeline({
   loopIterationHint,
 }: StageTimelineProps) {
   const stages = STAGES_BY_MODE[mode];
-  // currentStage can be a stage this mode's own array doesn't include (e.g.
-  // a stale poll landing on "triage" for a "scan"-mode run) — clamp rather
-  // than let indexOf's -1 mark every node "pending".
   const currentIndex = Math.max(stages.indexOf(currentStage), 0);
+  const [expandedStage, setExpandedStage] = useState<Stage | null>(null);
 
   return (
     <div className="stage-timeline">
@@ -49,7 +46,7 @@ export function StageTimeline({
           <strong>Cycle {loopIterationHint}:</strong> some tickets weren&apos;t verified fixed last pass — fixing, reviewing, and re-verifying again.
         </div>
       )}
-      <div className="stage-list" role="list">
+      <div className="hpipeline" role="list">
         {stages.map((stage, i) => {
           let status: "pending" | "current" | "completed" | "failed";
           if (allCompleted) {
@@ -62,16 +59,55 @@ export function StageTimeline({
             status = "pending";
           }
 
+          const isLast = i === stages.length - 1;
+
           return (
-            <StageNodeExpandable
-              key={stage}
-              stage={stage}
-              status={status}
-              logs={logsByStage[stage] || []}
-            />
+            <div key={stage} className="hpipeline__step">
+              <StageNodeExpandable
+                stage={stage}
+                status={status}
+                logs={logsByStage[stage] || []}
+                compact
+                isExpanded={expandedStage === stage}
+                onToggle={() => setExpandedStage(expandedStage === stage ? null : stage)}
+              />
+              {!isLast && (
+                <div className={`hpipeline__connector hpipeline__connector--${i < currentIndex ? "completed" : i === currentIndex ? "active" : "pending"}`}>
+                  <div className="hpipeline__connector-line" />
+                  <div className="hpipeline__connector-arrow" />
+                </div>
+              )}
+            </div>
           );
         })}
       </div>
+      {expandedStage && (
+        <div className="hpipeline__logs-panel">
+          <div className="hpipeline__logs-panel-header">
+            <span className="hpipeline__logs-panel-title">
+              {expandedStage.charAt(0).toUpperCase() + expandedStage.slice(1)} Logs
+            </span>
+            <button
+              className="hpipeline__logs-close"
+              onClick={() => setExpandedStage(null)}
+              aria-label="Close logs"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="hpipeline__logs-content">
+            {(logsByStage[expandedStage] || []).length === 0 ? (
+              <p className="stage-node__no-logs">No logs for this stage yet.</p>
+            ) : (
+              <pre className="stage-node__log-content">
+                {(logsByStage[expandedStage] || []).map((line, i) => (
+                  <div key={i}>{line}</div>
+                ))}
+              </pre>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

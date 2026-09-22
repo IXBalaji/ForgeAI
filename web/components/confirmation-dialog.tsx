@@ -14,8 +14,8 @@ interface ConfirmationDialogProps {
 
 const MODE_OPTIONS: Array<{ value: RunMode; label: string; description: string }> = [
   { value: "scan", label: "Scan report", description: "Scan the site and generate the accessibility report only. No tickets, no fixes." },
-  { value: "triage", label: "Scan + triage", description: "Scan and create tickets for every issue found. Nothing gets fixed — tickets are left \"open\" for later." },
-  { value: "full", label: "Scan + triage + fix", description: "The complete autonomous pipeline: scan, triage, fix, review, deploy to QA, verify, and release." },
+  { value: "triage", label: "Scan + classify", description: "Scan and classify every issue found, then create tickets. Nothing gets fixed — tickets are left \"open\" for later." },
+  { value: "full", label: "Scan + classify + fix", description: "The complete autonomous pipeline: scan, classify, fix, review, deploy to QA, verify, and release." },
 ];
 
 export function ConfirmationDialog({
