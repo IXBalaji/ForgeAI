@@ -14,6 +14,7 @@ import {
 import { generateFinalReport } from "./final-report.js";
 import { LABEL_PREFIX } from "../lib/config.js";
 import { getVcsProvider } from "../integrations/vcs/factory.js";
+import { logger } from "../lib/logger.js";
 import type { ReleaseReport } from "../types/index.js";
 
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
@@ -104,9 +105,9 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
         ...jiraKeys.map((k) => `- ${k}`),
       ];
       releasePr = await createReleasePr(vcs, QA_BRANCH, MAIN_BRANCH, title, bodyLines.join("\n"));
-      console.log(`[release] Created release PR ${releasePr?.htmlUrl ?? "(vcs not configured)"} (${QA_BRANCH} → ${MAIN_BRANCH}).`);
+      logger.info("release", `Created release PR ${releasePr?.htmlUrl ?? "(vcs not configured)"} (${QA_BRANCH} → ${MAIN_BRANCH}).`);
     } else {
-      console.log(`[release] Reusing existing open release PR #${releasePr.number} (${QA_BRANCH} → ${MAIN_BRANCH}).`);
+      logger.info("release", `Reusing existing open release PR #${releasePr.number} (${QA_BRANCH} → ${MAIN_BRANCH}).`);
     }
     if (releasePr) {
       await logAudit({
@@ -173,11 +174,11 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
     .where(and(eq(reportsGenerated.cycleId, cycleId), eq(reportsGenerated.type, "post_process_email")));
 
   if (alreadySent) {
-    console.log(`[release] Post-process email already sent for cycle ${cycleId} — skipping.`);
+    logger.info("release", `Post-process email already sent for cycle ${cycleId} — skipping.`);
     return report;
   }
 
-  console.log(`[release] Generating final report and sending post-process email for cycle ${cycleId}...`);
+  logger.info("release", `Generating final report and sending post-process email for cycle ${cycleId}...`);
   try {
     const { filePath } = await generateFinalReport(cycleId);
     await sendEmail(
@@ -199,7 +200,7 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
       details: { resolvedCount: doneTickets.length, unresolvedCount: emailData.unresolvedCount },
       status: "success",
     });
-    console.log(`[release] Post-process email sent for cycle ${cycleId}.`);
+    logger.info("release", `Post-process email sent for cycle ${cycleId}.`);
 
     // The report's only purpose was as the email attachment — once it's sent,
     // delete the local copy rather than accumulating report files forever.
@@ -207,10 +208,10 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
     try {
       unlinkSync(filePath);
     } catch (err) {
-      console.warn(`[release] Could not delete report file ${filePath} after sending:`, err instanceof Error ? err.message : err);
+      logger.warn("release", `Could not delete report file ${filePath} after sending:`, err instanceof Error ? err.message : err);
     }
   } catch (err) {
-    console.error(`[release] Post-process email failed for cycle ${cycleId}:`, err instanceof Error ? err.message : err);
+    logger.error("release", `Post-process email failed for cycle ${cycleId}:`, err instanceof Error ? err.message : err);
     await logAudit({
       cycleId,
       action: "email.post_process_failed",

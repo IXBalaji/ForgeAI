@@ -13,6 +13,7 @@ import {
   reportsGenerated,
 } from "../db/schema.js";
 import { LABEL_PREFIX } from "../lib/config.js";
+import { logger } from "../lib/logger.js";
 import { renderFinalReportHtml, type FinalReportData } from "../integrations/report-template.js";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
@@ -40,7 +41,7 @@ export async function generateFinalReport(cycleId: string): Promise<FinalReportR
     .from(reportsGenerated)
     .where(and(eq(reportsGenerated.cycleId, cycleId), eq(reportsGenerated.type, "final_report")));
   if (existing?.filePath) {
-    console.log(`[final-report] Report already generated for cycle ${cycleId} — reusing ${existing.filePath}.`);
+    logger.info(`final-report`, `Report already generated for cycle ${cycleId} — reusing ${existing.filePath}.`);
     return { filePath: existing.filePath, reportId: existing.id };
   }
 
@@ -115,6 +116,6 @@ export async function generateFinalReport(cycleId: string): Promise<FinalReportR
     .onConflictDoNothing({ target: [reportsGenerated.cycleId, reportsGenerated.type] })
     .returning();
 
-  console.log(`[final-report] Wrote final report for cycle ${cycleId} to ${filePath}.`);
+  logger.info(`final-report`, `Wrote final report for cycle ${cycleId} to ${filePath}.`);
   return { filePath, reportId: row?.id ?? existing?.id ?? "" };
 }

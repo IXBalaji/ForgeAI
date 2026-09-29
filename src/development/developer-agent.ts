@@ -16,6 +16,7 @@ import { gitRepoMutex } from "../lib/mutex.js";
 import { ensureGitIdentity } from "../lib/git-identity.js";
 import { assertTargetRepoConfigured, ensureFreshQaBase } from "../lib/repo-config.js";
 import { categorize } from "../triage/categorize.js";
+import { logger } from "../lib/logger.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
@@ -68,7 +69,7 @@ async function ensureWorktree(branch: string, worktreeDir: string): Promise<void
   } catch (err) {
     const msg = (err as Error).message;
     if (msg.includes("already exists")) {
-      console.warn(`[developer] Branch/worktree "${branch}" already exists — cleaning up and retrying.`);
+      logger.warn(`developer`, `Branch/worktree "${branch}" already exists — cleaning up and retrying.`);
       try { await run("git", ["worktree", "remove", worktreeDir, "--force"], TARGET_REPO_PATH); } catch { /* may not exist on disk */ }
       try { await run("git", ["branch", "-D", branch], TARGET_REPO_PATH); } catch { /* may not exist */ }
       await run("git", ["worktree", "add", "-b", branch, worktreeDir, startPoint], TARGET_REPO_PATH);
@@ -89,7 +90,7 @@ async function runAgentWithRetry(
   },
 ): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.warn("[developer] ANTHROPIC_API_KEY not set — skipping the actual fix, worktree left in place.");
+    logger.warn("developer", "ANTHROPIC_API_KEY not set — skipping the actual fix, worktree left in place.");
     return;
   }
 
@@ -121,11 +122,11 @@ async function runAgentWithRetry(
         ...(opts?.systemPrompt ? { systemPrompt: opts.systemPrompt } : {}),
       },
       onAssistantMessage: (content) => {
-        console.log("[developer]", JSON.stringify(content));
+        logger.info("developer", JSON.stringify(content));
       },
     });
   } catch (err) {
-    console.warn(`[developer] Agent call failed after ${MAX_RETRIES + 1} attempts: ${(err as Error).message}`);
+    logger.warn(`developer`, `Agent call failed after ${MAX_RETRIES + 1} attempts: ${(err as Error).message}`);
   }
 }
 
@@ -166,11 +167,11 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     : [];
 
   if (ticketIssues.length === 0 && ticket?.category) {
-    console.warn(`[developer] Ticket ${ticketId} has no linked issues — searching by category "${ticket.category}"...`);
+    logger.warn(`developer`, `Ticket ${ticketId} has no linked issues — searching by category "${ticket.category}"...`);
     const allIssues = await db.select().from(issues).where(eq(issues.status, "ticketed"));
     const matched = allIssues.filter((i) => categorize(i.wcagRule) === ticket.category);
     if (matched.length > 0) {
-      console.log(`[developer] Found ${matched.length} issue(s) matching category "${ticket.category}" — linking to ticket.`);
+      logger.info(`developer`, `Found ${matched.length} issue(s) matching category "${ticket.category}" — linking to ticket.`);
       const matchedIds = matched.map((i) => i.id);
       await db.update(tickets).set({ issueIds: matchedIds }).where(eq(tickets.id, ticketId));
       ticketIssues = matched;
@@ -178,18 +179,18 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   }
 
   if (ticketIssues.length === 0) {
-    console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping SDK agent.`);
-    console.warn(`[developer]   ticket.issueIds (${rawIssueIds.length}): ${JSON.stringify(rawIssueIds)}`);
-    console.warn(`[developer]   issues found in DB: ${ticketIssues.length}`);
+    logger.warn(`developer`, `Ticket ${ticketId} has no resolvable issues — skipping SDK agent.`);
+    logger.warn(`developer`, `  ticket.issueIds (${rawIssueIds.length}): ${JSON.stringify(rawIssueIds)}`);
+    logger.warn(`developer`, `  issues found in DB: ${ticketIssues.length}`);
     if (rawIssueIds.length > 0) {
-      console.warn(`[developer]   ⚠ The issueIds exist on the ticket but no matching rows were found in the issues table.`);
-      console.warn(`[developer]   This usually means: (a) issues were created in a different scan run that was deleted,`);
-      console.warn(`[developer]   (b) the triage step stored stale/incorrect issueIds, or (c) the issues table was truncated.`);
+      logger.warn(`developer`, `  ⚠ The issueIds exist on the ticket but no matching rows were found in the issues table.`);
+      logger.warn(`developer`, `  This usually means: (a) issues were created in a different scan run that was deleted,`);
+      logger.warn(`developer`, `  (b) the triage step stored stale/incorrect issueIds, or (c) the issues table was truncated.`);
     } else {
-      console.warn(`[developer]   ⚠ The ticket has an empty issueIds array — triage may not have linked any issues to it.`);
+      logger.warn(`developer`, `  ⚠ The ticket has an empty issueIds array — triage may not have linked any issues to it.`);
     }
     try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (err) {
-      console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
+      logger.warn(`developer`, `Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
     }
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     const cleanupLock = await gitRepoMutex.acquire();
@@ -202,28 +203,28 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
   // Claude SDK fix runs unlocked — multiple tickets fix in parallel
   const systemPrompt = buildSystemPrompt();
   const prompt = await buildUserPrompt(ticketId);
-  console.log(`[developer] ── SDK agent starting for ticket ${ticketId} on branch ${branch} ──`);
-  console.log(`[developer]   Worktree: ${worktreeDir}`);
-  console.log(`[developer]   Prompt length: ${prompt.length} chars (system: ${systemPrompt.length} chars)`);
+  logger.info(`developer`, `── SDK agent starting for ticket ${ticketId} on branch ${branch} ──`);
+  logger.info(`developer`, `  Worktree: ${worktreeDir}`);
+  logger.info(`developer`, `  Prompt length: ${prompt.length} chars (system: ${systemPrompt.length} chars)`);
   const sdkStart = Date.now();
   await runAgentWithRetry(prompt, worktreeDir, { issue_id: ticketId, operation_name: "generate_fix", systemPrompt });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
-  console.log(`[developer] ── SDK agent finished for ticket ${ticketId} (${sdkDuration}s) ──`);
+  logger.info(`developer`, `── SDK agent finished for ticket ${ticketId} (${sdkDuration}s) ──`);
 
   // Log raw working tree state before acquiring lock — shows what the SDK
   // agent actually touched, independent of git add / commit.
   try {
     const { stdout: rawStatus } = await run("git", ["status", "--short"], worktreeDir);
     if (rawStatus.trim()) {
-      console.log(`[developer] Working tree changes after SDK (ticket ${ticketId}):`);
+      logger.info(`developer`, `Working tree changes after SDK (ticket ${ticketId}):`);
       for (const line of rawStatus.trim().split("\n")) {
-        console.log(`[developer]   ${line}`);
+        logger.info(`developer`, `  ${line}`);
       }
     } else {
-      console.warn(`[developer] Working tree is clean after SDK — no files were modified (ticket ${ticketId}).`);
+      logger.warn(`developer`, `Working tree is clean after SDK — no files were modified (ticket ${ticketId}).`);
     }
   } catch {
-    console.warn(`[developer] Could not read working tree status for ticket ${ticketId}.`);
+    logger.warn(`developer`, `Could not read working tree status for ticket ${ticketId}.`);
   }
 
   // Re-acquire lock for commit, push, and worktree cleanup
@@ -243,7 +244,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
       const reserved = /^(nul|con|prn|aux|com[0-9]|lpt[0-9])(\..+)?$/i;
       for (const f of lsOut.split("\n").map((l) => l.trim()).filter(Boolean)) {
         if (reserved.test(f.split("/").pop()!)) {
-          console.warn(`[developer] Removing Windows-reserved file: ${f}`);
+          logger.warn(`developer`, `Removing Windows-reserved file: ${f}`);
           await run("git", ["rm", "-f", "--", f], worktreeDir).catch(() =>
             rm(resolve(worktreeDir, f), { force: true }).catch(() => {}),
           );
@@ -257,19 +258,19 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
 
     const { stdout: statusOut } = await run("git", ["status", "--porcelain"], worktreeDir);
     if (statusOut.trim().length === 0) {
-      console.warn(`[developer] No file changes detected for ticket ${ticketId} — the SDK agent did not modify any files.`);
+      logger.warn(`developer`, `No file changes detected for ticket ${ticketId} — the SDK agent did not modify any files.`);
     } else {
       const changedFiles = statusOut.trim().split("\n");
-      console.log(`[developer] ── Changes by SDK agent on branch ${branch} (${changedFiles.length} file(s)) ──`);
+      logger.info(`developer`, `── Changes by SDK agent on branch ${branch} (${changedFiles.length} file(s)) ──`);
       for (const line of changedFiles) {
-        console.log(`[developer]   ${line}`);
+        logger.info(`developer`, `  ${line}`);
       }
 
       const { stdout: diffStat } = await run("git", ["diff", "--cached", "--stat"], worktreeDir);
       if (diffStat.trim()) {
-        console.log(`[developer] ── Diff summary ──`);
+        logger.info(`developer`, `── Diff summary ──`);
         for (const line of diffStat.trim().split("\n")) {
-          console.log(`[developer]   ${line}`);
+          logger.info(`developer`, `  ${line}`);
         }
       }
 
@@ -278,7 +279,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
       await run("git", ["commit", "-m", `fix(${LABEL_PREFIX_SLUG}):${jiraRef} ${branch}`], worktreeDir);
       const { stdout } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
       commitSha = stdout.trim();
-      console.log(`[developer] Committed ${commitSha} on branch ${branch}`);
+      logger.info(`developer`, `Committed ${commitSha} on branch ${branch}`);
     }
 
     if (commitSha) {
@@ -297,15 +298,15 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
           const isLast = pushAttempt >= PUSH_MAX_RETRIES - 1;
           if (isLast) {
             pushStatus = "failed";
-            console.error(`[developer] Push failed after ${PUSH_MAX_RETRIES} attempts for branch ${branch}.`, err);
+            logger.error(`developer`, `Push failed after ${PUSH_MAX_RETRIES} attempts for branch ${branch}.`, err);
             try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (jiraErr) {
-              console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (jiraErr as Error).message?.slice(0, 200));
+              logger.warn(`developer`, `Failed to transition ${ticket?.jiraKey} to To Do:`, (jiraErr as Error).message?.slice(0, 200));
             }
             await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
             throw err;
           }
           const delay = Math.min(1000 * 2 ** pushAttempt, 10000);
-          console.warn(`[developer] Push attempt ${pushAttempt + 1} failed, retrying in ${delay / 1000}s...`, (err as Error).message);
+          logger.warn(`developer`, `Push attempt ${pushAttempt + 1} failed, retrying in ${delay / 1000}s...`, (err as Error).message);
           await new Promise((r) => setTimeout(r, delay));
         }
       }
@@ -315,9 +316,9 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     // committed and pushed. Otherwise leave the ticket as "open" so the graph
     // recovery logic retries it on the next cycle.
     if (!commitSha) {
-      console.warn(`[developer] No commit produced for ticket ${ticketId} on branch ${branch} — resetting ticket.`);
+      logger.warn(`developer`, `No commit produced for ticket ${ticketId} on branch ${branch} — resetting ticket.`);
       try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (err) {
-        console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
+        logger.warn(`developer`, `Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
       }
       await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     } else {
@@ -342,7 +343,7 @@ async function _runDeveloperAgent(ticketId: string): Promise<DeveloperResult> {
     try {
       await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH);
     } catch {
-      console.warn(`[developer] Could not remove worktree at ${worktreeDir} — clean up manually.`);
+      logger.warn(`developer`, `Could not remove worktree at ${worktreeDir} — clean up manually.`);
     }
   } finally {
     releaseLock();
@@ -371,11 +372,11 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
     : [];
 
   if (ticketIssues.length === 0 && ticket?.category) {
-    console.warn(`[developer] Ticket ${ticketId} has no linked issues — searching by category "${ticket.category}"...`);
+    logger.warn(`developer`, `Ticket ${ticketId} has no linked issues — searching by category "${ticket.category}"...`);
     const allIssues = await db.select().from(issues).where(eq(issues.status, "ticketed"));
     const matched = allIssues.filter((i) => categorize(i.wcagRule) === ticket.category);
     if (matched.length > 0) {
-      console.log(`[developer] Found ${matched.length} issue(s) matching category "${ticket.category}" — linking to ticket.`);
+      logger.info(`developer`, `Found ${matched.length} issue(s) matching category "${ticket.category}" — linking to ticket.`);
       const matchedIds = matched.map((i) => i.id);
       await db.update(tickets).set({ issueIds: matchedIds }).where(eq(tickets.id, ticketId));
       ticketIssues = matched;
@@ -383,9 +384,9 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
   }
 
   if (ticketIssues.length === 0) {
-    console.warn(`[developer] Ticket ${ticketId} has no resolvable issues — skipping.`);
+    logger.warn(`developer`, `Ticket ${ticketId} has no resolvable issues — skipping.`);
     try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (err) {
-      console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
+      logger.warn(`developer`, `Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
     }
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
@@ -394,11 +395,11 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
   const systemPrompt = buildSystemPrompt();
   const prompt = await buildUserPrompt(ticketId);
   const jiraRef = ticket?.jiraKey ?? ticketId.slice(0, 8);
-  console.log(`[developer] ── SDK agent starting for ${jiraRef} ──`);
+  logger.info(`developer`, `── SDK agent starting for ${jiraRef} ──`);
   const sdkStart = Date.now();
   await runAgentWithRetry(prompt, worktreeDir, { issue_id: ticketId, operation_name: "generate_fix", systemPrompt });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
-  console.log(`[developer] ── SDK agent finished for ${jiraRef} (${sdkDuration}s) ──`);
+  logger.info(`developer`, `── SDK agent finished for ${jiraRef} (${sdkDuration}s) ──`);
 
   // Remove Windows reserved device names
   try {
@@ -408,7 +409,7 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
     const reserved = /^(nul|con|prn|aux|com[0-9]|lpt[0-9])(\..+)?$/i;
     for (const f of lsOut.split("\n").map((l) => l.trim()).filter(Boolean)) {
       if (reserved.test(f.split("/").pop()!)) {
-        console.warn(`[developer] Removing Windows-reserved file: ${f}`);
+        logger.warn(`developer`, `Removing Windows-reserved file: ${f}`);
         await run("git", ["rm", "-f", "--", f], worktreeDir).catch(() =>
           rm(resolve(worktreeDir, f), { force: true }).catch(() => {}),
         );
@@ -420,24 +421,24 @@ async function _fixTicketOnBranch(ticketId: string, worktreeDir: string): Promis
   const { stdout: statusOut } = await run("git", ["status", "--porcelain"], worktreeDir);
 
   if (statusOut.trim().length === 0) {
-    console.warn(`[developer] No file changes for ${jiraRef} — SDK agent did not modify any files.`);
+    logger.warn(`developer`, `No file changes for ${jiraRef} — SDK agent did not modify any files.`);
     try { if (ticket?.jiraKey) await tracker.transitionTicket(ticket.jiraKey, "To Do"); } catch (err) {
-      console.warn(`[developer] Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
+      logger.warn(`developer`, `Failed to transition ${ticket?.jiraKey} to To Do:`, (err as Error).message?.slice(0, 200));
     }
     await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
     return { ticketId, commitSha: null, jiraKey: ticket?.jiraKey ?? null };
   }
 
   const changedFiles = statusOut.trim().split("\n");
-  console.log(`[developer] Changes for ${jiraRef} (${changedFiles.length} file(s)):`);
-  for (const line of changedFiles) console.log(`[developer]   ${line}`);
+  logger.info(`developer`, `Changes for ${jiraRef} (${changedFiles.length} file(s)):`);
+  for (const line of changedFiles) logger.info(`developer`, `  ${line}`);
 
   const commitMsg = `fix(${LABEL_PREFIX_SLUG}): [${ticket?.jiraKey ?? ticketId.slice(0, 8)}] ${ticket?.category ?? "accessibility fix"}`;
   await ensureGitIdentity(worktreeDir);
   await run("git", ["commit", "-m", commitMsg], worktreeDir);
   const { stdout: shaOut } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
   const commitSha = shaOut.trim();
-  console.log(`[developer] Committed ${commitSha} for ${jiraRef}`);
+  logger.info(`developer`, `Committed ${commitSha} for ${jiraRef}`);
 
   const { stdout: branchOut } = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], worktreeDir);
   await recordFixAttempts([ticketId], branchOut.trim(), commitSha);
@@ -476,7 +477,7 @@ async function _fixBuildErrors(worktreeDir: string, reviewComments: string): Pro
     `5. Do NOT introduce new features or change functionality — only fix the errors.`,
   ].join("\n");
 
-  console.log(`[developer] ── Autofix starting for build errors ──`);
+  logger.info(`developer`, `── Autofix starting for build errors ──`);
   const sdkStart = Date.now();
   await runAgentWithRetry(prompt, worktreeDir, {
     operation_name: "fix_build_errors",
@@ -484,13 +485,13 @@ async function _fixBuildErrors(worktreeDir: string, reviewComments: string): Pro
     systemPrompt: buildSystemPrompt(),
   });
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
-  console.log(`[developer] ── Autofix finished (${sdkDuration}s) ──`);
+  logger.info(`developer`, `── Autofix finished (${sdkDuration}s) ──`);
 
   await run("git", ["add", "-A"], worktreeDir);
   const { stdout: statusOut } = await run("git", ["status", "--porcelain"], worktreeDir);
 
   if (statusOut.trim().length === 0) {
-    console.warn(`[developer] Autofix made no changes.`);
+    logger.warn(`developer`, `Autofix made no changes.`);
     return null;
   }
 
@@ -499,6 +500,6 @@ async function _fixBuildErrors(worktreeDir: string, reviewComments: string): Pro
   await run("git", ["commit", "-m", commitMsg], worktreeDir);
   const { stdout: shaOut } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
   const commitSha = shaOut.trim();
-  console.log(`[developer] Autofix committed: ${commitSha}`);
+  logger.info(`developer`, `Autofix committed: ${commitSha}`);
   return commitSha;
 }

@@ -178,11 +178,11 @@ program
       .limit(parseInt(opts.limit));
 
     if (openTickets.length === 0) {
-      console.log("[fix:all] No open tickets found in local DB");
+      logger.info("fix:all", "No open tickets found in local DB");
       return;
     }
 
-    console.log(`[fix:all] Found ${openTickets.length} open ticket(s) — creating single branch\n`);
+    logger.info("fix:all", `Found ${openTickets.length} open ticket(s) — creating single branch\n`);
 
     // Log ticket details
     for (const ticket of openTickets) {
@@ -190,9 +190,9 @@ program
       const resolvedIssues = issueIds.length > 0
         ? await db.select().from(issues).where(inArray(issues.id, issueIds))
         : [];
-      console.log(`[fix:all] ── Ticket ${ticket.id} (${ticket.jiraKey ?? "no jira key"}) ──`);
-      console.log(`[fix:all]   category: ${ticket.category}`);
-      console.log(`[fix:all]   issueIds: ${issueIds.length} stored, ${resolvedIssues.length} found in DB`);
+      logger.info("fix:all", `── Ticket ${ticket.id} (${ticket.jiraKey ?? "no jira key"}) ──`);
+      logger.info("fix:all", `  category: ${ticket.category}`);
+      logger.info("fix:all", `  issueIds: ${issueIds.length} stored, ${resolvedIssues.length} found in DB`);
     }
 
     // Stage 1: Create a single branch
@@ -208,28 +208,28 @@ program
     } finally {
       releaseLock();
     }
-    console.log(`[fix:all] Branch: ${branch}\n`);
+    logger.info("fix:all", `Branch: ${branch}\n`);
 
     // Stage 2: Fix each ticket on the shared branch
     const fixedTicketIds: string[] = [];
     for (let i = 0; i < openTickets.length; i++) {
       const ticket = openTickets[i];
-      console.log(`\n[fix:all] ── Fixing ticket ${i + 1}/${openTickets.length}: ${ticket.jiraKey ?? ticket.id.slice(0, 8)} ──`);
+      logger.info("fix:all", `\n── Fixing ticket ${i + 1}/${openTickets.length}: ${ticket.jiraKey ?? ticket.id.slice(0, 8)} ──`);
       try {
         const result: BatchFixResult = await withSpan("agent.developer", () => fixTicketOnBranch(ticket.id, worktreeDir));
         if (result.commitSha) {
           fixedTicketIds.push(ticket.id);
-          console.log(`[fix:all] ✓ Committed: ${result.commitSha.slice(0, 7)}`);
+          logger.info("fix:all", `✓ Committed: ${result.commitSha.slice(0, 7)}`);
         } else {
-          console.warn(`[fix:all] ✗ No changes produced`);
+          logger.warn("fix:all", `✗ No changes produced`);
         }
       } catch (err) {
-        console.error(`[fix:all] Developer failed for ${ticket.jiraKey ?? ticket.id.slice(0, 8)}: ${(err as Error).message}`);
+        logger.error("fix:all", `Developer failed for ${ticket.jiraKey ?? ticket.id.slice(0, 8)}: ${(err as Error).message}`);
       }
     }
 
     if (fixedTicketIds.length === 0) {
-      console.log("\n[fix:all] No tickets produced commits — cleaning up.");
+      logger.info("fix:all", "\nNo tickets produced commits — cleaning up.");
       releaseLock = await gitRepoMutex.acquire();
       try { await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH); } catch {} finally { releaseLock(); }
       return;
@@ -243,19 +243,19 @@ program
         await run("git", ["remote", "set-url", "origin", authRemote], worktreeDir);
       }
       await run("git", ["-c", "credential.helper=", "push", "-u", "origin", branch], worktreeDir);
-      console.log(`\n[fix:all] Pushed branch with ${fixedTicketIds.length} fix commit(s).`);
+      logger.info("fix:all", `\nPushed branch with ${fixedTicketIds.length} fix commit(s).`);
     } finally {
       releaseLock();
     }
 
     // Stage 4: Review entire branch (no PR — findings are commented onto tickets)
-    console.log(`\n[fix:all] Running reviewer on entire branch...`);
+    logger.info("fix:all", `\nRunning reviewer on entire branch...`);
     let branchReview: BranchReviewVerdict;
     try {
       branchReview = await withSpan("agent.reviewer", () => reviewBranch(worktreeDir, fixedTicketIds, null));
-      console.log(`[fix:all] Reviewer verdict: ${branchReview.verdict} (${branchReview.blockingFindingsCount} blocking finding(s))`);
+      logger.info("fix:all", `Reviewer verdict: ${branchReview.verdict} (${branchReview.blockingFindingsCount} blocking finding(s))`);
     } catch (err) {
-      console.error(`[fix:all] Reviewer failed: ${(err as Error).message}`);
+      logger.error("fix:all", `Reviewer failed: ${(err as Error).message}`);
       releaseLock = await gitRepoMutex.acquire();
       try { await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH); } catch {} finally { releaseLock(); }
       return;
@@ -266,17 +266,17 @@ program
     try { await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH); } catch {} finally { releaseLock(); }
 
     if (branchReview.verdict !== "approved") {
-      console.log(`[fix:all] Reviewer rejected — all ${fixedTicketIds.length} ticket(s) remain open.`);
+      logger.info("fix:all", `Reviewer rejected — all ${fixedTicketIds.length} ticket(s) remain open.`);
       return;
     }
 
     // Stage 5: Deploy — merge the branch directly into QA
-    console.log(`\n[fix:all] Merging branch ${branch} into ${QA_BRANCH}...`);
+    logger.info("fix:all", `\nMerging branch ${branch} into ${QA_BRANCH}...`);
     try {
       const result: BranchDeployResult = await withSpan("agent.deploy", () => deployBranch(branch, fixedTicketIds));
-      console.log(`[fix:all] Deploy done:`, JSON.stringify(result, null, 2));
+      logger.info("fix:all", `Deploy done: ${JSON.stringify(result, null, 2)}`);
     } catch (err) {
-      console.error(`[fix:all] Deploy failed: ${(err as Error).message}`);
+      logger.error("fix:all", `Deploy failed: ${(err as Error).message}`);
     }
   });
 
@@ -294,41 +294,41 @@ program
       .limit(parseInt(opts.limit));
 
     if (attempts.length === 0) {
-      console.log("[review:deploy] No fix attempts with PRs found");
+      logger.info("review:deploy", "No fix attempts with PRs found");
       return;
     }
 
-    console.log(`[review:deploy] Found ${attempts.length} fix attempt(s) with PRs`);
+    logger.info("review:deploy", `Found ${attempts.length} fix attempt(s) with PRs`);
     for (const attempt of attempts) {
-      console.log(`\n[review:deploy] ── Attempt ${attempt.id} (branch: ${attempt.branch}) ──`);
+      logger.info("review:deploy", `\n── Attempt ${attempt.id} (branch: ${attempt.branch}) ──`);
 
       // Stage 1: Reviewer
       let reviewResult: ReviewerVerdict | null = null;
       try {
-        console.log(`[review:deploy] Running reviewer...`);
+        logger.info("review:deploy", `Running reviewer...`);
         reviewResult = await withSpan("agent.reviewer", () => runReviewerAgent(attempt.id));
-        console.log(`[review:deploy] Reviewer verdict:`, JSON.stringify(reviewResult, null, 2));
+        logger.info("review:deploy", `Reviewer verdict: ${JSON.stringify(reviewResult, null, 2)}`);
       } catch (err) {
-        console.error(`[review:deploy] Reviewer failed: ${(err as Error).message}`);
+        logger.error("review:deploy", `Reviewer failed: ${(err as Error).message}`);
         continue;
       }
 
       if (reviewResult.verdict !== "approved") {
-        console.log(`[review:deploy] Reviewer rejected — skipping deploy`);
+        logger.info("review:deploy", `Reviewer rejected — skipping deploy`);
         continue;
       }
       if (reviewResult.scopeGuardFlagged) {
-        console.log(`[review:deploy] Scope guard flagged — holding for manual review`);
+        logger.info("review:deploy", `Scope guard flagged — holding for manual review`);
         continue;
       }
 
       // Stage 2: Deploy
       try {
-        console.log(`[review:deploy] Running deploy...`);
+        logger.info("review:deploy", `Running deploy...`);
         const deployResult: DeployResult = await withSpan("agent.deploy", () => runDeployAgent(attempt.id));
-        console.log(`[review:deploy] Deploy done:`, JSON.stringify(deployResult, null, 2));
+        logger.info("review:deploy", `Deploy done: ${JSON.stringify(deployResult, null, 2)}`);
       } catch (err) {
-        console.error(`[review:deploy] Deploy failed: ${(err as Error).message}`);
+        logger.error("review:deploy", `Deploy failed: ${(err as Error).message}`);
       }
     }
   });

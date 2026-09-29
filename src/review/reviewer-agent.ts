@@ -17,6 +17,7 @@ import type { PrReviewComment } from "../integrations/vcs/types.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 import { redactSecrets } from "../observability/sanitize.js";
 import { logAudit } from "../lib/audit-log.js";
+import { logger } from "../lib/logger.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
@@ -70,11 +71,11 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   const [attempt] = await db.select().from(fixAttempts).where(eq(fixAttempts.id, fixAttemptId));
   if (!attempt) throw new Error(`FixAttempt ${fixAttemptId} not found`);
   if (attempt.pushStatus !== "pushed") {
-    console.warn(`[reviewer] FixAttempt ${fixAttemptId} pushStatus is "${attempt.pushStatus}" — branch may only exist locally.`);
+    logger.warn(`reviewer`, `FixAttempt ${fixAttemptId} pushStatus is "${attempt.pushStatus}" — branch may only exist locally.`);
   }
   const [ticket] = await db.select().from(tickets).where(eq(tickets.id, attempt.ticketId));
   if (!ticket) {
-    console.error(`[reviewer] Ticket ${attempt.ticketId} not found — rejecting fix attempt.`);
+    logger.error(`reviewer`, `Ticket ${attempt.ticketId} not found — rejecting fix attempt.`);
     const [reviewResult] = await db
       .insert(reviewResults)
       .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: `Ticket ${attempt.ticketId} not found in database.` })
@@ -92,7 +93,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
     try {
       await run("git", ["fetch", "origin", QA_BRANCH], TARGET_REPO_PATH);
     } catch (err) {
-      console.error(`[reviewer] git fetch failed: ${(err as Error).message}`);
+      logger.error(`reviewer`, `git fetch failed: ${(err as Error).message}`);
       const [reviewResult] = await db
         .insert(reviewResults)
         .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: `git fetch failed: ${(err as Error).message.slice(0, 500)}` })
@@ -109,9 +110,9 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
       try {
         await run("git", ["rev-parse", "--verify", attempt.branch], TARGET_REPO_PATH);
         branchRef = attempt.branch;
-        console.log(`[reviewer] Branch ${attempt.branch} not on remote — using local ref.`);
+        logger.info(`reviewer`, `Branch ${attempt.branch} not on remote — using local ref.`);
       } catch {
-        console.error(`[reviewer] Branch ${attempt.branch} not found locally or on remote.`);
+        logger.error(`reviewer`, `Branch ${attempt.branch} not found locally or on remote.`);
         const [reviewResult] = await db
           .insert(reviewResults)
           .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: `Branch ${attempt.branch} not found locally or on remote.` })
@@ -135,7 +136,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
     try {
       await run("git", ["worktree", "add", worktreeDir, branchRef], TARGET_REPO_PATH);
     } catch (err) {
-      console.error(`[reviewer] git worktree add failed: ${(err as Error).message}`);
+      logger.error(`reviewer`, `git worktree add failed: ${(err as Error).message}`);
       const [reviewResult] = await db
         .insert(reviewResults)
         .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: `git worktree add failed: ${(err as Error).message.slice(0, 500)}` })
@@ -149,10 +150,10 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   const { stdout: nameOnly } = await run("git", ["diff", "--name-only", `origin/${QA_BRANCH}`], worktreeDir);
   const touchedFiles = nameOnly.trim().split("\n").filter(Boolean);
 
-  console.log(`[reviewer] Changed files (${touchedFiles.length}):`, touchedFiles.join(", "));
+  logger.info("reviewer", `Changed files (${touchedFiles.length}): ${touchedFiles.join(", ")}`);
 
   if (touchedFiles.length === 0) {
-    console.warn("[reviewer] No files changed — nothing to review.");
+    logger.warn("reviewer", "No files changed — nothing to review.");
     const [reviewResult] = await db
       .insert(reviewResults)
       .values({ fixAttemptId, verdict: "rejected", resolvedIssueIds: [], scopeGuardFlagged: false, comments: "No files changed in the fix attempt." })
@@ -164,7 +165,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   const guard = await scopeGuard(worktreeDir);
   const tests = await testGate(worktreeDir, touchedFiles);
 
-  console.log(`[reviewer] Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`);
+  logger.info(`reviewer`, `Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`);
 
   const ticketIssues = await db.select().from(issues).where(inArray(issues.id, (ticket?.issueIds as string[]) ?? []));
 
@@ -189,7 +190,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
       await preview.stop();
     }
   } catch (err) {
-    console.warn("[reviewer] Ephemeral re-scan unavailable — skipping (non-blocking).", err);
+    logger.warn("reviewer", "Ephemeral re-scan unavailable — skipping (non-blocking).", err);
     rescanSkipped = true;
   }
 
@@ -204,7 +205,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
     tests.passed && rescanPassed && blockingFindingsCount === 0 ? "approved" : "rejected";
 
   if (findings.length > 0) {
-    console.warn(`[reviewer] Adversarial review findings (${blockingFindingsCount} blocking):`, summarizeFindings(findings).slice(0, 500));
+    logger.warn(`reviewer`, `Adversarial review findings (${blockingFindingsCount} blocking):`, summarizeFindings(findings).slice(0, 500));
   }
 
   const rescanStatus = rescanSkipped
@@ -252,7 +253,7 @@ async function _runReviewerAgent(fixAttemptId: string): Promise<ReviewerVerdict>
   try {
     await run("git", ["worktree", "remove", worktreeDir], TARGET_REPO_PATH);
   } catch {
-    console.warn(`[reviewer] Could not remove worktree at ${worktreeDir} — clean up manually.`);
+    logger.warn(`reviewer`, `Could not remove worktree at ${worktreeDir} — clean up manually.`);
   } finally {
     releaseLock();
   }
@@ -284,16 +285,16 @@ async function _reviewBranch(
   const { stdout: nameOnly } = await run("git", ["diff", "--name-only", `origin/${QA_BRANCH}`], worktreeDir);
   const touchedFiles = nameOnly.trim().split("\n").filter(Boolean);
 
-  console.log(`[reviewer] Branch review — ${touchedFiles.length} changed file(s) across ${ticketIds.length} ticket(s)`);
+  logger.info(`reviewer`, `Branch review — ${touchedFiles.length} changed file(s) across ${ticketIds.length} ticket(s)`);
 
   if (touchedFiles.length === 0) {
-    console.warn("[reviewer] No files changed on branch — nothing to review.");
+    logger.warn("reviewer", "No files changed on branch — nothing to review.");
     return { verdict: "rejected", scopeGuardFlagged: false, comments: "No files changed on the branch.", findings: [], blockingFindingsCount: 0, prReviewId: null };
   }
 
   const guard = await scopeGuard(worktreeDir);
   const tests = await testGate(worktreeDir, touchedFiles);
-  console.log(`[reviewer] Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`);
+  logger.info(`reviewer`, `Build/lint/test gate: ${tests.passed ? "PASSED" : "FAILED"} — ${tests.output}`);
 
   // Combine acceptance criteria across all tickets in this batch.
   const acCriteria = (await Promise.all(ticketIds.map(acceptanceCriteriaFor))).filter(Boolean).join("\n");
@@ -303,7 +304,7 @@ async function _reviewBranch(
   const verdict: "approved" | "rejected" = tests.passed && blockingFindingsCount === 0 ? "approved" : "rejected";
 
   if (findings.length > 0) {
-    console.warn(`[reviewer] Adversarial review findings (${blockingFindingsCount} blocking):`, summarizeFindings(findings).slice(0, 500));
+    logger.warn(`reviewer`, `Adversarial review findings (${blockingFindingsCount} blocking):`, summarizeFindings(findings).slice(0, 500));
   }
 
   const comments = [
@@ -322,7 +323,7 @@ async function _reviewBranch(
     try {
       prReviewId = await vcs.addReviewComments(prNumber, prComments);
     } catch (err) {
-      console.warn(`[reviewer] Failed to post PR review comments for PR #${prNumber}:`, (err as Error).message?.slice(0, 200));
+      logger.warn(`reviewer`, `Failed to post PR review comments for PR #${prNumber}:`, (err as Error).message?.slice(0, 200));
     }
     if (cycleId) {
       await logAudit({
@@ -349,7 +350,7 @@ async function _reviewBranch(
       .orderBy(desc(fixAttempts.createdAt))
       .limit(1);
     if (!latestAttempt) {
-      console.warn(`[reviewer] No fix_attempts row found for ticket ${ticketId.slice(0, 8)} — skipping review_results persistence.`);
+      logger.warn(`reviewer`, `No fix_attempts row found for ticket ${ticketId.slice(0, 8)} — skipping review_results persistence.`);
       continue;
     }
     await db.insert(reviewResults).values({
@@ -371,7 +372,7 @@ async function _reviewBranch(
         try {
           await tracker.comment(ticket.jiraKey, `Review (${verdict}):\n${comments}`);
         } catch (err) {
-          console.warn(`[reviewer] Failed to post review comment on ${ticket.jiraKey}:`, (err as Error).message?.slice(0, 200));
+          logger.warn(`reviewer`, `Failed to post review comment on ${ticket.jiraKey}:`, (err as Error).message?.slice(0, 200));
         }
       }
     }

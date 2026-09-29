@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import type { RawFinding } from "./axe-scan.js";
 import type { Severity } from "../types/index.js";
+import { logger } from "../lib/logger.js";
 
 export interface VisionScanOptions {
   storageState?: string | object;
@@ -45,7 +46,7 @@ const FINDINGS_SCHEMA = {
  */
 export async function runVisionScan(baseUrl: string, routes: string[], options?: VisionScanOptions): Promise<RawFinding[]> {
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.warn("[vision-scan] ANTHROPIC_API_KEY not set — skipping the vision pass.");
+    logger.warn("vision-scan", "ANTHROPIC_API_KEY not set — skipping the vision pass.");
     return [];
   }
 
@@ -98,7 +99,7 @@ export async function runVisionScan(baseUrl: string, routes: string[], options?:
       }
     }
   } catch (err) {
-    console.warn("[vision-scan] Vision pass failed — continuing without it.", err);
+    logger.warn("vision-scan", "Vision pass failed — continuing without it.", err);
   } finally {
     await browser.close();
   }

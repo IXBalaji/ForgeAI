@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import type { TrackerProvider, TrackerIssue } from "./types.js";
 import { markdownToAdf } from "./markdown-to-adf.js";
 import { JiraAuthError, JiraApiError } from "./errors.js";
+import { logger } from "../../lib/logger.js";
 import { adfToMarkdown } from "./adf-to-markdown.js";
 import { LABEL_PREFIX, JIRA_PROJECT_KEY, JIRA_BASE_URL } from "../../lib/config.js";
 import { db } from "../../db/client.js";
@@ -69,7 +70,7 @@ export class JiraAdapter implements TrackerProvider {
     if (cycle?.epicKey) return cycle.epicKey;
 
     if (!this.isConfigured()) {
-      console.warn("[jira] Jira not configured — skipping epic creation.");
+      logger.warn("jira", "Jira not configured — skipping epic creation.");
       return null;
     }
 
@@ -98,7 +99,7 @@ export class JiraAdapter implements TrackerProvider {
     priority?: "P1" | "P2" | "P3" | "P4";
   }): Promise<string | null> {
     if (!this.isConfigured()) {
-      console.warn(`[jira] Jira not configured — ticket "${params.summary}" logged locally only.`);
+      logger.warn("jira", `Jira not configured — ticket "${params.summary}" logged locally only.`);
       return null;
     }
 
@@ -143,7 +144,7 @@ export class JiraAdapter implements TrackerProvider {
       method: "PUT",
       body: JSON.stringify({ fields }),
     });
-    console.log(`[jira] Updated ${params.key}`);
+    logger.info("jira", `Updated ${params.key}`);
   }
 
   async findExisting(params: { summaryPrefix: string; labels: string[] }): Promise<string | null> {
@@ -157,7 +158,7 @@ export class JiraAdapter implements TrackerProvider {
       const issues = await this.searchRaw(jql, 1);
       if (issues.length > 0) return issues[0].key;
     } catch (err) {
-      console.warn(`[jira] Duplicate search failed (non-blocking): ${(err as Error).message.slice(0, 200)}`);
+      logger.warn("jira", `Duplicate search failed (non-blocking): ${(err as Error).message.slice(0, 200)}`);
     }
     return null;
   }
@@ -167,7 +168,7 @@ export class JiraAdapter implements TrackerProvider {
     const { transitions } = await this.jiraFetch(`/rest/api/3/issue/${key}/transitions`, { method: "GET" });
     const match = transitions.find((t: any) => t.name.toLowerCase() === statusName.toLowerCase());
     if (!match) {
-      console.warn(`[jira] No transition named "${statusName}" on ${key}`);
+      logger.warn("jira", `No transition named "${statusName}" on ${key}`);
       return;
     }
     await this.jiraFetch(`/rest/api/3/issue/${key}/transitions`, {

@@ -1,6 +1,7 @@
 import { db } from "../db/client.js";
 import { auditLog } from "../db/schema.js";
 import { redactSecrets, sanitizeForTrace } from "../observability/sanitize.js";
+import { logger } from "./logger.js";
 
 export interface AuditLogEntry {
   cycleId: string;
@@ -30,8 +31,9 @@ export async function logAudit(entry: AuditLogEntry): Promise<void> {
       status: entry.status,
     });
   } catch (err) {
-    console.warn(
-      `[audit-log] Failed to write audit entry for action "${entry.action}":`,
+    logger.warn(
+      "audit-log",
+      `Failed to write audit entry for action "${entry.action}":`,
       redactSecrets((err as Error).message ?? String(err)).slice(0, 300),
     );
   }

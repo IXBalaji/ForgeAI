@@ -175,7 +175,7 @@ async function recoverDanglingWorkNode(state: typeof CycleState.State) {
   const recoverableTicketIds = new Set([...byBranch.values()].flatMap((g) => g.ticketIds));
   const orphanTicketIds = ticketIds.filter((id) => !recoverableTicketIds.has(id));
   if (orphanTicketIds.length > 0) {
-    console.warn(`[orchestrate] ${orphanTicketIds.length} in-progress ticket(s) had no recoverable branch — resetting to open.`);
+    logger.warn("orchestrate", `${orphanTicketIds.length} in-progress ticket(s) had no recoverable branch — resetting to open.`);
     await db.update(tickets).set({ status: "open" }).where(inArray(tickets.id, orphanTicketIds));
   }
 
@@ -189,8 +189,9 @@ async function recoverDanglingWorkNode(state: typeof CycleState.State) {
     (a, b) => b[1].latestCreatedAt.getTime() - a[1].latestCreatedAt.getTime(),
   )[0];
 
-  console.log(
-    `[orchestrate] Found dangling in-progress work on branch "${branch}" (${group.ticketIds.length} ticket(s)) from a previous interrupted run — resuming review/merge instead of reporting "no open tickets".`,
+  logger.info(
+    "orchestrate",
+    `Found dangling in-progress work on branch "${branch}" (${group.ticketIds.length} ticket(s)) from a previous interrupted run — resuming review/merge instead of reporting "no open tickets".`,
   );
 
   assertTargetRepoConfigured();
@@ -212,8 +213,9 @@ async function recoverDanglingWorkNode(state: typeof CycleState.State) {
         recovered = true;
       }
     } catch (err) {
-      console.warn(
-        `[orchestrate] Could not recover branch "${branch}" from local refs or origin — resetting its ticket(s) to open.`,
+      logger.warn(
+        "orchestrate",
+        `Could not recover branch "${branch}" from local refs or origin — resetting its ticket(s) to open.`,
         (err as Error).message?.slice(0, 200),
       );
     } finally {
@@ -249,7 +251,7 @@ async function recoverDanglingWorkNode(state: typeof CycleState.State) {
   }
 
   if (alreadyMerged) {
-    console.log(`[orchestrate] Branch "${branch}" is already merged into ${QA_BRANCH} — skipping re-review/merge, going straight to verification.`);
+    logger.info("orchestrate", `Branch "${branch}" is already merged into ${QA_BRANCH} — skipping re-review/merge, going straight to verification.`);
     await removeWorktreeWithRetry(worktreeDir, null);
     await logAudit({
       cycleId: state.cycleId,
@@ -296,7 +298,7 @@ async function recoverDanglingWorkNode(state: typeof CycleState.State) {
 
 function routeAfterRecovery(state: typeof CycleState.State) {
   if (state.branch) {
-    console.log(`[orchestrate] Resuming pipeline on recovered branch ${state.branch} — skipping scan/triage for this pass.`);
+    logger.info("orchestrate", `Resuming pipeline on recovered branch ${state.branch} — skipping scan/triage for this pass.`);
     return "pushBranch";
   }
   return "scan";
@@ -307,21 +309,21 @@ function routeAfterRecovery(state: typeof CycleState.State) {
 async function scanNode(state: typeof CycleState.State) {
   return withSpan("scan.playwright", async () => {
     if (state.cycleNumber > 0) {
-      console.log(`[orchestrate] Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
+      logger.info("orchestrate", `Waiting ${DEPLOY_SETTLE_MS / 1000}s for CI/CD to deploy merged changes...`);
       await new Promise((r) => setTimeout(r, DEPLOY_SETTLE_MS));
     }
-    console.log("[orchestrate] Running Playwright + axe scan via headless test:a11y...");
+    logger.info("orchestrate", "Running Playwright + axe scan via headless test:a11y...");
     try {
       await run("npx", ["playwright", "test", "--workers=1"], PROJECT_ROOT);
     } catch (err) {
-      console.warn("[orchestrate] Some Playwright tests may have failed — continuing with available reports.", (err as Error).message.slice(0, 300));
+      logger.warn("orchestrate", "Some Playwright tests may have failed — continuing with available reports.", (err as Error).message.slice(0, 300));
     }
     try {
       await run("node", ["src/scan/scripts/generate-a11y-report.mjs"], PROJECT_ROOT);
     } catch (err) {
-      console.warn("[orchestrate] Report generation had issues:", (err as Error).message.slice(0, 300));
+      logger.warn("orchestrate", "Report generation had issues:", (err as Error).message.slice(0, 300));
     }
-    console.log("[orchestrate] Scan complete.");
+    logger.info("orchestrate", "Scan complete.");
     setPipelineCycleNumber(state.cycleNumber + 1);
     return { cycleNumber: state.cycleNumber + 1, freshScan: true };
   });
@@ -334,10 +336,10 @@ export function routeAfterScan(state: typeof CycleState.State) {
 
 async function triageNode(state: typeof CycleState.State) {
   return runAgentTrace("triage", async () => {
-    console.log("[orchestrate] Running triage from reports...");
+    logger.info("orchestrate", "Running triage from reports...");
     const epicKey = state.epicKey ?? (await tracker.ensureEpic(state.cycleId));
     const result = await triageFromReports({ cycleId: state.cycleId, epicKey });
-    console.log(`[orchestrate] Triage complete: ${result.dbSync.ticketsCreated} ticket(s) created, ${result.summary.totalViolationTypes} violation type(s).`);
+    logger.info("orchestrate", `Triage complete: ${result.dbSync.ticketsCreated} ticket(s) created, ${result.summary.totalViolationTypes} violation type(s).`);
     return { epicKey };
   });
 }
@@ -358,7 +360,7 @@ export async function routeAfterTriage(state: typeof CycleState.State) {
     return "preProcessEmail";
   }
   if (state.cycleNumber >= MAX_CYCLES) {
-    console.log(`[orchestrate] Max cycles reached — moving to release.`);
+    logger.info("orchestrate", `Max cycles reached — moving to release.`);
     return "release";
   }
   const epicFilter = state.epicKey ? eq(tickets.epicKey, state.epicKey) : undefined;
@@ -368,10 +370,10 @@ export async function routeAfterTriage(state: typeof CycleState.State) {
     .where(epicFilter ? and(epicFilter, notInArray(tickets.status, ["done", "parked", "flagged"])) : notInArray(tickets.status, ["done", "parked", "flagged"]));
 
   if (unresolved.length === 0) {
-    console.log(`[orchestrate] All ticket(s) for cycle ${state.cycleId} are resolved (done/parked/flagged) — releasing.`);
+    logger.info("orchestrate", `All ticket(s) for cycle ${state.cycleId} are resolved (done/parked/flagged) — releasing.`);
     return "release";
   }
-  console.log(`[orchestrate] ${unresolved.length} ticket(s) still unresolved — continuing to fix.`);
+  logger.info("orchestrate", `${unresolved.length} ticket(s) still unresolved — continuing to fix.`);
   return "preProcessEmail";
 }
 
@@ -386,7 +388,7 @@ async function preProcessEmailNode(state: typeof CycleState.State) {
       .from(reportsGenerated)
       .where(and(eq(reportsGenerated.cycleId, state.cycleId), eq(reportsGenerated.type, "pre_process_email")));
     if (already) {
-      console.log(`[orchestrate] Pre-process email already sent for cycle ${state.cycleId} — skipping.`);
+      logger.info("orchestrate", `Pre-process email already sent for cycle ${state.cycleId} — skipping.`);
       return {};
     }
 
@@ -436,7 +438,7 @@ async function preProcessEmailNode(state: typeof CycleState.State) {
       status: "success",
     });
   } catch (err) {
-    console.warn(`[orchestrate] Pre-process email failed for cycle ${state.cycleId} — continuing.`, (err as Error).message?.slice(0, 300));
+    logger.warn("orchestrate", `Pre-process email failed for cycle ${state.cycleId} — continuing.`, (err as Error).message?.slice(0, 300));
     await logAudit({
       cycleId: state.cycleId,
       action: "email.pre_process_failed",
@@ -458,7 +460,7 @@ export function routeAfterPreProcessEmail(state: typeof CycleState.State) {
 // out the iteration_cycles row for them (without it, the run would look
 // perpetually "in progress" to the web dashboard once the process exits).
 async function finishNode(state: typeof CycleState.State) {
-  console.log(`[orchestrate] "${state.mode}" run complete for cycle ${state.cycleId}.`);
+  logger.info("orchestrate", `"${state.mode}" run complete for cycle ${state.cycleId}.`);
   await db.update(iterationCycles).set({ endedAt: new Date() }).where(eq(iterationCycles.id, state.cycleId));
   return {};
 }
@@ -473,7 +475,7 @@ async function prepareBranchNode(state: typeof CycleState.State) {
     : await db.select().from(tickets).where(eq(tickets.status, "open"));
 
   if (openTickets.length === 0) {
-    console.log(`[orchestrate] No open tickets found.`);
+    logger.info("orchestrate", `No open tickets found.`);
     return { openTicketIds: [], fixedTicketIds: [], currentTicketIndex: 0, branch: null, worktreeDir: null };
   }
 
@@ -503,10 +505,10 @@ async function prepareBranchNode(state: typeof CycleState.State) {
     releaseLock();
   }
 
-  console.log(`[orchestrate] Created branch ${branch} for ${openTickets.length} ticket(s): ${jiraKeys.join(", ") || ticketIds.map((id) => id.slice(0, 8)).join(", ")}`);
+  logger.info("orchestrate", `Created branch ${branch} for ${openTickets.length} ticket(s): ${jiraKeys.join(", ") || ticketIds.map((id) => id.slice(0, 8)).join(", ")}`);
   for (const t of openTickets) {
     const issueCount = (t.issueIds as string[] | null)?.length ?? 0;
-    console.log(`[orchestrate]   ${t.jiraKey ?? t.id.slice(0, 8)} — category: "${t.category}", linked issues: ${issueCount}`);
+    logger.info("orchestrate", `  ${t.jiraKey ?? t.id.slice(0, 8)} — category: "${t.category}", linked issues: ${issueCount}`);
   }
 
   await db.update(tickets).set({ status: "in_progress" }).where(inArray(tickets.id, ticketIds));
@@ -515,7 +517,7 @@ async function prepareBranchNode(state: typeof CycleState.State) {
       try {
         await tracker.transitionTicket(t.jiraKey, "In Progress");
       } catch (err) {
-        console.warn(`[orchestrate] Failed to transition ${t.jiraKey} to In Progress:`, (err as Error).message?.slice(0, 200));
+        logger.warn("orchestrate", `Failed to transition ${t.jiraKey} to In Progress:`, (err as Error).message?.slice(0, 200));
       }
     }
   }
@@ -526,10 +528,10 @@ async function prepareBranchNode(state: typeof CycleState.State) {
 function routeAfterPrepareBranch(state: typeof CycleState.State) {
   if (state.openTicketIds.length === 0) {
     if (state.freshScan) {
-      console.log(`[orchestrate] No open tickets after fresh scan — moving to release.`);
+      logger.info("orchestrate", `No open tickets after fresh scan — moving to release.`);
       return "release";
     }
-    console.log(`[orchestrate] All tickets processed — rescanning for new issues.`);
+    logger.info("orchestrate", `All tickets processed — rescanning for new issues.`);
     return "scan";
   }
   return "fixNext";
@@ -541,13 +543,13 @@ async function fixNextNode(state: typeof CycleState.State) {
   const current = state.currentTicketIndex + 1;
 
   return runAgentTrace("developer", async () => {
-    console.log(`[orchestrate] Fixing ticket ${current}/${total}: ${ticketId.slice(0, 8)}...`);
+    logger.info("orchestrate", `Fixing ticket ${current}/${total}: ${ticketId.slice(0, 8)}...`);
 
     let result: BatchFixResult;
     try {
       result = await fixTicketOnBranch(ticketId, state.worktreeDir!);
     } catch (err) {
-      console.error(`[orchestrate] ✗ ticket ${ticketId.slice(0, 8)} threw an error — skipping.`, (err as Error).message?.slice(0, 300));
+      logger.error("orchestrate", `✗ ticket ${ticketId.slice(0, 8)} threw an error — skipping.`, (err as Error).message?.slice(0, 300));
       await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
       try {
         const [ticket] = await db.select().from(tickets).where(eq(tickets.id, ticketId));
@@ -561,9 +563,9 @@ async function fixNextNode(state: typeof CycleState.State) {
       : state.fixedTicketIds;
 
     if (result.commitSha) {
-      console.log(`[orchestrate] ✓ ${result.jiraKey ?? ticketId.slice(0, 8)} committed: ${result.commitSha.slice(0, 7)}`);
+      logger.info("orchestrate", `✓ ${result.jiraKey ?? ticketId.slice(0, 8)} committed: ${result.commitSha.slice(0, 7)}`);
     } else {
-      console.warn(`[orchestrate] ✗ ${result.jiraKey ?? ticketId.slice(0, 8)} — no changes produced.`);
+      logger.warn("orchestrate", `✗ ${result.jiraKey ?? ticketId.slice(0, 8)} — no changes produced.`);
     }
 
     return { fixedTicketIds: newFixed, currentTicketIndex: state.currentTicketIndex + 1 };
@@ -575,7 +577,7 @@ function routeAfterFix(state: typeof CycleState.State) {
     return "fixNext";
   }
   if (state.fixedTicketIds.length === 0) {
-    console.log(`[orchestrate] No tickets produced commits — skipping review.`);
+    logger.info("orchestrate", `No tickets produced commits — skipping review.`);
     return "cleanup";
   }
   return "pushBranch";
@@ -608,15 +610,15 @@ async function pushBranchWithRetry(worktreeDir: string, branch: string, label: s
 // git push only, no model call — not wrapped in runAgentTrace.
 async function pushBranchNode(state: typeof CycleState.State) {
   await pushBranchWithRetry(state.worktreeDir!, state.branch!, `push branch ${state.branch}`);
-  console.log(`[orchestrate] Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
+  logger.info("orchestrate", `Pushed branch ${state.branch} with ${state.fixedTicketIds.length} fix commit(s).`);
   return {};
 }
 
 async function reviewBranchNode(state: typeof CycleState.State) {
   return runAgentTrace("reviewer", async () => {
-    console.log(`[orchestrate] Reviewing branch ${state.branch} (${state.fixedTicketIds.length} ticket(s))...`);
+    logger.info("orchestrate", `Reviewing branch ${state.branch} (${state.fixedTicketIds.length} ticket(s))...`);
     const result = await reviewBranch(state.worktreeDir!, state.fixedTicketIds, null, state.cycleId);
-    console.log(`[orchestrate] Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""} (${result.blockingFindingsCount} blocking finding(s))`);
+    logger.info("orchestrate", `Reviewer verdict: ${result.verdict}${result.scopeGuardFlagged ? " (scope-flagged)" : ""} (${result.blockingFindingsCount} blocking finding(s))`);
     return { reviewVerdict: result.verdict, reviewComments: result.comments };
   });
 }
@@ -626,10 +628,10 @@ function routeAfterReviewBranch(state: typeof CycleState.State) {
     return "mergeBranch";
   }
   if (state.retryCount < MAX_REVIEW_RETRIES) {
-    console.log(`[orchestrate] Review rejected (attempt ${state.retryCount + 1}/${MAX_REVIEW_RETRIES}) — running autofix.`);
+    logger.info("orchestrate", `Review rejected (attempt ${state.retryCount + 1}/${MAX_REVIEW_RETRIES}) — running autofix.`);
     return "fixBranch";
   }
-  console.log(`[orchestrate] Review rejected after ${MAX_REVIEW_RETRIES} retries — giving up.`);
+  logger.info("orchestrate", `Review rejected after ${MAX_REVIEW_RETRIES} retries — giving up.`);
   return "cleanup";
 }
 
@@ -637,18 +639,18 @@ function routeAfterReviewBranch(state: typeof CycleState.State) {
 // on the same branch, then re-review. No PR to update, just re-push.
 async function fixBranchNode(state: typeof CycleState.State) {
   return runAgentTrace("developer", async () => {
-    console.log(`[orchestrate] Fix Agent addressing review feedback (retry ${state.retryCount + 1}/${MAX_REVIEW_RETRIES})...`);
+    logger.info("orchestrate", `Fix Agent addressing review feedback (retry ${state.retryCount + 1}/${MAX_REVIEW_RETRIES})...`);
 
     let commitSha: string | null = null;
     try {
       commitSha = await fixBuildErrors(state.worktreeDir!, state.reviewComments ?? "Build failed");
     } catch (err) {
-      console.error(`[orchestrate] Fix Agent failed:`, (err as Error).message?.slice(0, 300));
+      logger.error("orchestrate", `Fix Agent failed:`, (err as Error).message?.slice(0, 300));
       return { retryCount: state.retryCount + 1 };
     }
 
     if (commitSha) {
-      console.log(`[orchestrate] Fix Agent committed: ${commitSha.slice(0, 7)} — re-pushing to the same branch...`);
+      logger.info("orchestrate", `Fix Agent committed: ${commitSha.slice(0, 7)} — re-pushing to the same branch...`);
       // Record a new attempt per ticket for this commit — without this,
       // deploy-agent's independent fix_attempts/review_results re-check would
       // keep finding the earlier rejected attempt as "latest" after a retry.
@@ -656,10 +658,10 @@ async function fixBranchNode(state: typeof CycleState.State) {
       try {
         await pushBranchWithRetry(state.worktreeDir!, state.branch!, `fixBranch re-push ${state.branch}`);
       } catch (err) {
-        console.error(`[orchestrate] Fix Agent push failed:`, (err as Error).message?.slice(0, 300));
+        logger.error("orchestrate", `Fix Agent push failed:`, (err as Error).message?.slice(0, 300));
       }
     } else {
-      console.warn(`[orchestrate] Fix Agent made no changes.`);
+      logger.warn("orchestrate", `Fix Agent made no changes.`);
     }
 
     return { retryCount: state.retryCount + 1 };
@@ -668,13 +670,13 @@ async function fixBranchNode(state: typeof CycleState.State) {
 
 async function mergeBranchNode(state: typeof CycleState.State) {
   return runAgentTrace("deploy", async () => {
-    console.log(`[orchestrate] Merging branch ${state.branch} into ${QA_BRANCH}...`);
+    logger.info("orchestrate", `Merging branch ${state.branch} into ${QA_BRANCH}...`);
     try {
       const result = await deployBranch(state.branch!, state.fixedTicketIds, state.cycleId);
       if (result.status === "succeeded") {
-        console.log(`[orchestrate] Merge complete — ${result.ticketsDeployed} ticket(s) merged, awaiting verification.`);
+        logger.info("orchestrate", `Merge complete — ${result.ticketsDeployed} ticket(s) merged, awaiting verification.`);
       } else {
-        console.warn(`[orchestrate] Merge ${result.status}${result.blockReason ? `: ${result.blockReason}` : ""}.`);
+        logger.warn("orchestrate", `Merge ${result.status}${result.blockReason ? `: ${result.blockReason}` : ""}.`);
         if (result.status === "failed") {
           await notifyUnrecoverableError({
             cycleId: state.cycleId,
@@ -686,7 +688,7 @@ async function mergeBranchNode(state: typeof CycleState.State) {
         }
       }
     } catch (err) {
-      console.error(`[orchestrate] Merge failed for branch ${state.branch}:`, (err as Error).message?.slice(0, 300));
+      logger.error("orchestrate", `Merge failed for branch ${state.branch}:`, (err as Error).message?.slice(0, 300));
       for (const ticketId of state.fixedTicketIds) {
         await db.update(tickets).set({ status: "open" }).where(eq(tickets.id, ticketId));
       }
@@ -710,7 +712,7 @@ async function removeWorktreeWithRetry(worktreeDir: string, branch: string | nul
     const releaseLock = await gitRepoMutex.acquire();
     try {
       await run("git", ["worktree", "remove", "--force", worktreeDir], TARGET_REPO_PATH);
-      console.log(`[orchestrate] Removed worktree at ${worktreeDir}.`);
+      logger.info("orchestrate", `Removed worktree at ${worktreeDir}.`);
       if (branch) {
         try {
           await run("git", ["branch", "-D", branch], TARGET_REPO_PATH);
@@ -719,9 +721,9 @@ async function removeWorktreeWithRetry(worktreeDir: string, branch: string | nul
       return;
     } catch (err) {
       if (attempt < WORKTREE_REMOVE_RETRIES) {
-        console.warn(`[orchestrate] Worktree removal attempt ${attempt}/${WORKTREE_REMOVE_RETRIES} failed, retrying in ${WORKTREE_RETRY_DELAY_MS / 1000}s...`, (err as Error).message?.slice(0, 200));
+        logger.warn("orchestrate", `Worktree removal attempt ${attempt}/${WORKTREE_REMOVE_RETRIES} failed, retrying in ${WORKTREE_RETRY_DELAY_MS / 1000}s...`, (err as Error).message?.slice(0, 200));
       } else {
-        console.error(`[orchestrate] Could not remove worktree at ${worktreeDir} after ${WORKTREE_REMOVE_RETRIES} attempts.`);
+        logger.error("orchestrate", `Could not remove worktree at ${worktreeDir} after ${WORKTREE_REMOVE_RETRIES} attempts.`);
       }
     } finally {
       releaseLock();
@@ -768,10 +770,10 @@ async function cleanupNode(state: typeof CycleState.State) {
 
 async function releaseNode(state: typeof CycleState.State) {
   return runAgentTrace("release", async () => {
-    console.log(`[orchestrate] Running release for cycle ${state.cycleId}...`);
+    logger.info("orchestrate", `Running release for cycle ${state.cycleId}...`);
     await db.update(iterationCycles).set({ endedAt: new Date() }).where(eq(iterationCycles.id, state.cycleId));
     await runReleaseAgent(state.cycleId);
-    console.log(`[orchestrate] Release complete.`);
+    logger.info("orchestrate", `Release complete.`);
     return {};
   });
 }

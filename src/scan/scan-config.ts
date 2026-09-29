@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { WCAG_REGISTRY, type WcagCriterion, getEnabledAxeRules } from "./wcag-rules.js";
+import { logger } from "../lib/logger.js";
 
 /**
  * Scan configuration — controls which WCAG criteria and axe-core rules are
@@ -45,10 +46,10 @@ function loadConfigFile(): ScanConfigFile {
     if (p && existsSync(p)) {
       try {
         const raw = JSON.parse(readFileSync(p, "utf-8"));
-        console.log(`[scan-config] Loaded config from ${p}`);
+        logger.info(`scan-config`, `Loaded config from ${p}`);
         return raw;
       } catch (err) {
-        console.warn(`[scan-config] Failed to parse ${p}: ${(err as Error).message}`);
+        logger.warn(`scan-config`, `Failed to parse ${p}: ${(err as Error).message}`);
       }
     }
   }
@@ -126,12 +127,12 @@ export function resolveAxeConfig(config?: ScanRuleConfig): {
   const disabledCriteria = WCAG_REGISTRY.filter((c) => !c.enabled);
 
   if (disabledCriteria.length > 0) {
-    console.log(`[scan-config] ${disabledCriteria.length} WCAG criteria detached: ${disabledCriteria.map((c) => c.id).join(", ")}`);
+    logger.info(`scan-config`, `${disabledCriteria.length} WCAG criteria detached: ${disabledCriteria.map((c) => c.id).join(", ")}`);
   }
   if (cfg.disableRules.length > 0) {
-    console.log(`[scan-config] ${cfg.disableRules.length} axe rules detached: ${cfg.disableRules.join(", ")}`);
+    logger.info(`scan-config`, `${cfg.disableRules.length} axe rules detached: ${cfg.disableRules.join(", ")}`);
   }
-  console.log(`[scan-config] ${registryRules.size} axe rules active from ${enabledCriteria.length}/${WCAG_REGISTRY.length} WCAG criteria`);
+  logger.info(`scan-config`, `${registryRules.size} axe rules active from ${enabledCriteria.length}/${WCAG_REGISTRY.length} WCAG criteria`);
 
   return {
     tags: cfg.axeTags.length > 0 ? cfg.axeTags : DEFAULT_AXE_TAGS,

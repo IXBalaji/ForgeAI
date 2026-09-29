@@ -10,6 +10,7 @@ import { run } from "../lib/exec.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 import { getVcsProvider } from "../integrations/vcs/factory.js";
 import { DEVELOPER_MODEL, DEVELOPER_EFFORT, DEVELOPER_MAX_TURNS, LABEL_PREFIX_SLUG } from "../lib/config.js";
+import { logger } from "../lib/logger.js";
 
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
@@ -91,9 +92,9 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
     `${baseName}-conflict-resolve`,
   );
 
-  console.log(`[conflict-resolver] Starting conflict resolution for branch ${branch}`);
+  logger.info("conflict-resolver", `Starting conflict resolution for branch ${branch}`);
   if (ticket?.jiraKey) {
-    console.log(`[conflict-resolver] Jira reference: ${ticket.jiraKey}`);
+    logger.info("conflict-resolver", `Jira reference: ${ticket.jiraKey}`);
   }
 
   let releaseLock = await gitRepoMutex.acquire();
@@ -125,8 +126,9 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
   try {
     await run("git", ["merge", `origin/${QA_BRANCH}`, "--no-edit"], worktreeDir);
     // If merge succeeds without conflicts, we're done
-    console.log(
-      `[conflict-resolver] Merge succeeded without conflicts — no resolution needed.`,
+    logger.info(
+      "conflict-resolver",
+      `Merge succeeded without conflicts — no resolution needed.`,
     );
     const { stdout } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
     const commitSha = stdout.trim();
@@ -143,8 +145,9 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
   } catch (mergeErr) {
     const mergeMsg = (mergeErr as Error).message;
     if (!/conflict|merge/i.test(mergeMsg)) {
-      console.error(
-        `[conflict-resolver] Merge failed for non-conflict reason: ${mergeMsg}`,
+      logger.error(
+        "conflict-resolver",
+        `Merge failed for non-conflict reason: ${mergeMsg}`,
       );
       releaseLock = await gitRepoMutex.acquire();
       try {
@@ -165,11 +168,12 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
       worktreeDir,
     );
     conflictFiles = statusOut.trim().split("\n").filter(Boolean);
-    console.log(
-      `[conflict-resolver] ${conflictFiles.length} conflicted file(s): ${conflictFiles.join(", ")}`,
+    logger.info(
+      "conflict-resolver",
+      `${conflictFiles.length} conflicted file(s): ${conflictFiles.join(", ")}`,
     );
   } catch {
-    console.error(`[conflict-resolver] Could not identify conflicted files.`);
+    logger.error("conflict-resolver", `Could not identify conflicted files.`);
     releaseLock = await gitRepoMutex.acquire();
     try {
       await run("git", ["merge", "--abort"], worktreeDir).catch(() => {});
@@ -181,7 +185,7 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
   }
 
   if (conflictFiles.length === 0) {
-    console.warn(`[conflict-resolver] No conflicted files detected — aborting.`);
+    logger.warn("conflict-resolver", `No conflicted files detected — aborting.`);
     releaseLock = await gitRepoMutex.acquire();
     try {
       await run("git", ["merge", "--abort"], worktreeDir).catch(() => {});
@@ -200,14 +204,16 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
     worktreeDir,
   );
 
-  console.log(
-    `[conflict-resolver] Running Claude SDK agent to resolve ${conflictFiles.length} conflict(s)...`,
+  logger.info(
+    "conflict-resolver",
+    `Running Claude SDK agent to resolve ${conflictFiles.length} conflict(s)...`,
   );
   const sdkStart = Date.now();
   await runConflictAgent(prompt, worktreeDir);
   const sdkDuration = ((Date.now() - sdkStart) / 1000).toFixed(1);
-  console.log(
-    `[conflict-resolver] SDK agent finished (${sdkDuration}s)`,
+  logger.info(
+    "conflict-resolver",
+    `SDK agent finished (${sdkDuration}s)`,
   );
 
   // Check if conflicts are actually resolved
@@ -219,8 +225,9 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
     );
     const stillConflicted = remaining.trim().split("\n").filter(Boolean);
     if (stillConflicted.length > 0) {
-      console.error(
-        `[conflict-resolver] ${stillConflicted.length} file(s) still have conflicts: ${stillConflicted.join(", ")}`,
+      logger.error(
+        "conflict-resolver",
+        `${stillConflicted.length} file(s) still have conflicts: ${stillConflicted.join(", ")}`,
       );
       releaseLock = await gitRepoMutex.acquire();
       try {
@@ -245,8 +252,9 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
       worktreeDir,
     );
     if (statusOut.trim().length === 0) {
-      console.warn(
-        `[conflict-resolver] No changes after resolution — merge may have been trivial.`,
+      logger.warn(
+        "conflict-resolver",
+        `No changes after resolution — merge may have been trivial.`,
       );
     }
 
@@ -264,8 +272,9 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
 
     const { stdout } = await run("git", ["rev-parse", "HEAD"], worktreeDir);
     commitSha = stdout.trim();
-    console.log(
-      `[conflict-resolver] Committed resolution ${commitSha} on branch ${branch}`,
+    logger.info(
+      "conflict-resolver",
+      `Committed resolution ${commitSha} on branch ${branch}`,
     );
 
     await forcePushBranch(branch, worktreeDir);
@@ -274,8 +283,9 @@ async function _resolveConflicts(fixAttemptId: string): Promise<ConflictResolveR
     releaseLock();
   }
 
-  console.log(
-    `[conflict-resolver] Conflicts resolved and pushed for ${branch}${ticket?.jiraKey ? ` (${ticket.jiraKey})` : ""}`,
+  logger.info(
+    "conflict-resolver",
+    `Conflicts resolved and pushed for ${branch}${ticket?.jiraKey ? ` (${ticket.jiraKey})` : ""}`,
   );
 
   return { resolved: true, commitSha, conflictFiles };
@@ -294,7 +304,7 @@ async function forcePushBranch(
     ["-c", "credential.helper=", "push", "--force-with-lease", "-u", "origin", branch],
     worktreeDir,
   );
-  console.log(`[conflict-resolver] Force-pushed resolved branch ${branch}`);
+  logger.info("conflict-resolver", `Force-pushed resolved branch ${branch}`);
 }
 
 async function cleanupWorktree(worktreeDir: string): Promise<void> {
@@ -305,8 +315,9 @@ async function cleanupWorktree(worktreeDir: string): Promise<void> {
       TARGET_REPO_PATH,
     );
   } catch {
-    console.warn(
-      `[conflict-resolver] Could not remove worktree at ${worktreeDir} — clean up manually.`,
+    logger.warn(
+      "conflict-resolver",
+      `Could not remove worktree at ${worktreeDir} — clean up manually.`,
     );
   }
 }
@@ -375,8 +386,9 @@ async function buildConflictPrompt(
 
 async function runConflictAgent(prompt: string, worktreeDir: string, issueId?: string | null): Promise<void> {
   if (!process.env.ANTHROPIC_API_KEY) {
-    console.warn(
-      "[conflict-resolver] ANTHROPIC_API_KEY not set — cannot resolve conflicts automatically.",
+    logger.warn(
+      "conflict-resolver",
+      "ANTHROPIC_API_KEY not set — cannot resolve conflicts automatically.",
     );
     return;
   }
@@ -405,12 +417,13 @@ async function runConflictAgent(prompt: string, worktreeDir: string, issueId?: s
         systemPrompt: buildConflictSystemPrompt(QA_BRANCH),
       },
       onAssistantMessage: (content) => {
-        console.log("[conflict-resolver]", JSON.stringify(content));
+        logger.info("conflict-resolver", JSON.stringify(content));
       },
     });
   } catch (err) {
-    console.warn(
-      `[conflict-resolver] SDK call failed after ${MAX_RETRIES + 1} attempts: ${(err as Error).message}`,
+    logger.warn(
+      "conflict-resolver",
+      `SDK call failed after ${MAX_RETRIES + 1} attempts: ${(err as Error).message}`,
     );
   }
 }

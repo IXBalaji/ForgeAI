@@ -2,6 +2,7 @@ import "dotenv/config";
 import { createTransport } from "nodemailer";
 import { withRetry } from "../lib/retry.js";
 import { redactSecrets } from "../observability/sanitize.js";
+import { logger } from "../lib/logger.js";
 
 const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, EMAIL_FROM, EMAIL_TO, EMAIL_CC, EMAIL_BCC } = process.env;
 
@@ -11,7 +12,7 @@ export function isEmailConfigured(): boolean {
 
 if (isEmailConfigured()) {
   const extras = [EMAIL_CC && `cc=${EMAIL_CC}`, EMAIL_BCC && `bcc=${EMAIL_BCC}`].filter(Boolean).join(", ");
-  console.log(`[email] SMTP configured: host=${SMTP_HOST}, port=${SMTP_PORT || 587}, from=${EMAIL_FROM}, to=${EMAIL_TO}${extras ? `, ${extras}` : ""}`);
+  logger.info(`email`, `SMTP configured: host=${SMTP_HOST}, port=${SMTP_PORT || 587}, from=${EMAIL_FROM}, to=${EMAIL_TO}${extras ? `, ${extras}` : ""}`);
 } else {
   const missing = [
     !SMTP_HOST && "SMTP_HOST",
@@ -20,7 +21,7 @@ if (isEmailConfigured()) {
     !EMAIL_FROM && "EMAIL_FROM",
     !EMAIL_TO && "EMAIL_TO",
   ].filter(Boolean);
-  console.warn(`[email] SMTP not configured — missing: ${missing.join(", ")}. Email notifications will be skipped.`);
+  logger.warn(`email`, `SMTP not configured — missing: ${missing.join(", ")}. Email notifications will be skipped.`);
 }
 
 const transporter = isEmailConfigured()
@@ -44,7 +45,7 @@ export interface EmailAttachment {
  */
 export async function sendEmail(subject: string, text: string, html?: string, attachments?: EmailAttachment[]): Promise<void> {
   if (!transporter) {
-    console.warn("[email] SMTP not configured — report was not emailed.");
+    logger.warn("email", "SMTP not configured — report was not emailed.");
     return;
   }
 
@@ -53,7 +54,7 @@ export async function sendEmail(subject: string, text: string, html?: string, at
   const bccList = EMAIL_BCC ? EMAIL_BCC.split(",").map((a) => a.trim()) : [];
 
   try {
-    console.log(`[email] Sending report to ${recipients.join(", ")}${ccList.length ? ` cc=${ccList.join(", ")}` : ""}${bccList.length ? ` bcc=${bccList.join(", ")}` : ""} — subject: "${subject}"`);
+    logger.info(`email`, `Sending report to ${recipients.join(", ")}${ccList.length ? ` cc=${ccList.join(", ")}` : ""}${bccList.length ? ` bcc=${bccList.join(", ")}` : ""} — subject: "${subject}"`);
     const info = await withRetry(
       () =>
         transporter.sendMail({
@@ -68,16 +69,16 @@ export async function sendEmail(subject: string, text: string, html?: string, at
         }),
       { retries: 3, delayMs: 2000, backoff: "exponential", label: `email "${subject}"` },
     );
-    console.log(`[email] Report sent successfully — messageId: ${info.messageId}`);
+    logger.info(`email`, `Report sent successfully — messageId: ${info.messageId}`);
   } catch (err) {
-    console.error("[email] Failed to send report (giving up after retries):");
-    console.error(`[email]   Error: ${err instanceof Error ? redactSecrets(err.message) : String(err)}`);
+    logger.error("email", "Failed to send report (giving up after retries):");
+    logger.error(`email`, `  Error: ${err instanceof Error ? redactSecrets(err.message) : String(err)}`);
     if (err instanceof Error && err.stack) {
-      console.error(`[email]   Stack: ${redactSecrets(err.stack.split("\n").slice(1, 3).join(" | "))}`);
+      logger.error(`email`, `  Stack: ${redactSecrets(err.stack.split("\n").slice(1, 3).join(" | "))}`);
     }
-    console.error(`[email]   Config: host=${SMTP_HOST}, port=${SMTP_PORT || 587}, user=${SMTP_USER}, from=${EMAIL_FROM}`);
-    console.error(`[email]   Tip: If using Gmail, ensure you're using an App Password (not your regular password).`);
-    console.error(`[email]   Generate one at: https://myaccount.google.com/apppasswords`);
+    logger.error(`email`, `  Config: host=${SMTP_HOST}, port=${SMTP_PORT || 587}, user=${SMTP_USER}, from=${EMAIL_FROM}`);
+    logger.error(`email`, `  Tip: If using Gmail, ensure you're using an App Password (not your regular password).`);
+    logger.error(`email`, `  Generate one at: https://myaccount.google.com/apppasswords`);
   }
 }
 

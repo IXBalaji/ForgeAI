@@ -1,6 +1,7 @@
 import "dotenv/config";
 import { trace, SpanStatusCode } from "@opentelemetry/api";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
+import { logger } from "../lib/logger.js";
 
 // Verify this against the current @opentelemetry/sdk-node docs before relying
 // on it — the NodeSDK constructor shape (traceExporter vs. spanProcessors)
@@ -23,16 +24,16 @@ let started = false;
 function initLangSmith(): void {
   const tracingEnabled = process.env.LANGSMITH_TRACING_V2 ?? process.env.LANGCHAIN_TRACING_V2;
   if (tracingEnabled !== "true") {
-    console.log("[observability] LANGSMITH_TRACING_V2 not set to \"true\" — LangSmith tracing is off.");
+    logger.info("observability", "LANGSMITH_TRACING_V2 not set to \"true\" — LangSmith tracing is off.");
     return;
   }
   const apiKey = process.env.LANGSMITH_API_KEY ?? process.env.LANGCHAIN_API_KEY;
   if (!apiKey) {
-    console.warn("[observability] LANGSMITH_TRACING_V2=true but LANGSMITH_API_KEY is not set — LangSmith will drop traces silently.");
+    logger.warn("observability", "LANGSMITH_TRACING_V2=true but LANGSMITH_API_KEY is not set — LangSmith will drop traces silently.");
     return;
   }
   process.env.LANGSMITH_PROJECT ??= process.env.LANGCHAIN_PROJECT ?? `${LABEL_PREFIX_SLUG}-a11y-agents`;
-  console.log(`[observability] LangSmith tracing on — project "${process.env.LANGSMITH_PROJECT}".`);
+  logger.info(`observability`, `LangSmith tracing on — project "${process.env.LANGSMITH_PROJECT}".`);
 }
 
 export async function initObservability(serviceName = "a11y-agent-system"): Promise<void> {
@@ -51,7 +52,7 @@ export async function initObservability(serviceName = "a11y-agent-system"): Prom
     exporter = new OTLPTraceExporter({ url: endpoint }) as any;
   } else {
     exporter = new ConsoleSpanExporter();
-    console.log("[observability] OTEL_EXPORTER_OTLP_ENDPOINT not set — tracing to console only.");
+    logger.info("observability", "OTEL_EXPORTER_OTLP_ENDPOINT not set — tracing to console only.");
   }
 
   const sdk = new NodeSDK({

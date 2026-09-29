@@ -1,3 +1,5 @@
+import { logger } from "./logger.js";
+
 export interface RetryOptions {
   retries: number;
   delayMs: number;
@@ -24,11 +26,11 @@ export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions): Pr
       const canRetry = attempt < retries && isRetryable(err);
       const msg = err instanceof Error ? err.message.slice(0, 200) : String(err);
       if (!canRetry) {
-        console.error(`[retry] ${label} failed after ${attempt}/${retries} attempt(s).`, msg);
+        logger.error("retry", `${label} failed after ${attempt}/${retries} attempt(s).`, msg);
         throw err;
       }
       const wait = backoff === "exponential" ? delayMs * 2 ** (attempt - 1) : delayMs;
-      console.warn(`[retry] ${label} attempt ${attempt}/${retries} failed, retrying in ${wait / 1000}s...`, msg);
+      logger.warn("retry", `${label} attempt ${attempt}/${retries} failed, retrying in ${wait / 1000}s...`, msg);
       await new Promise((r) => setTimeout(r, wait));
     }
   }

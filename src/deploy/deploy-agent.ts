@@ -8,6 +8,7 @@ import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { LABEL_PREFIX_SLUG } from "../lib/config.js";
 import { resolveConflicts } from "./conflict-resolver.js";
 import { logAudit } from "../lib/audit-log.js";
+import { logger } from "../lib/logger.js";
 
 const QA_BRANCH = process.env.GITHUB_QA_BRANCH ?? "qa";
 
@@ -148,7 +149,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   if (!attempt) throw new Error(`FixAttempt ${fixAttemptId} not found`);
 
   if (attempt.pushStatus !== "pushed") {
-    console.error(`[deploy] FixAttempt ${fixAttemptId} was never pushed to remote (status: ${attempt.pushStatus}). Cannot merge.`);
+    logger.error(`deploy`, `FixAttempt ${fixAttemptId} was never pushed to remote (status: ${attempt.pushStatus}). Cannot merge.`);
     const [deployment] = await db
       .insert(deployments)
       .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
@@ -159,7 +160,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
   const [review] = await db.select().from(reviewResults).where(eq(reviewResults.fixAttemptId, fixAttemptId));
   if (!review || review.verdict !== "approved" || review.scopeGuardFlagged) {
     const reason = !review ? "no review result" : review.scopeGuardFlagged ? "scope-flagged for manual review" : `verdict: ${review.verdict}`;
-    console.warn(`[deploy] FixAttempt ${fixAttemptId} not cleared for merge — ${reason}.`);
+    logger.warn(`deploy`, `FixAttempt ${fixAttemptId} not cleared for merge — ${reason}.`);
     const [deployment] = await db
       .insert(deployments)
       .values({ env: QA_BRANCH, commitSha: "none", tag: null, status: "failed" })
@@ -182,26 +183,26 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
     const isConflict = vcs.isConflictError(err as Error);
 
     if (isConflict) {
-      console.warn(`[deploy] Merge conflict detected for ${attempt.branch}${jiraRef} — invoking conflict resolver...`);
+      logger.warn(`deploy`, `Merge conflict detected for ${attempt.branch}${jiraRef} — invoking conflict resolver...`);
       try {
         const resolution = await resolveConflicts(fixAttemptId);
         if (resolution.resolved) {
-          console.log(`[deploy] Conflicts resolved for ${attempt.branch} — retrying merge...`);
+          logger.info(`deploy`, `Conflicts resolved for ${attempt.branch} — retrying merge...`);
           commitSha = await vcs.mergeBranch(
             attempt.branch,
             QA_BRANCH,
             `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${attempt.branch} into ${QA_BRANCH} (conflicts resolved)`,
           );
         } else {
-          console.error(`[deploy] Conflict resolver could not resolve conflicts for ${attempt.branch} (files: ${resolution.conflictFiles.join(", ")})`);
+          logger.error(`deploy`, `Conflict resolver could not resolve conflicts for ${attempt.branch} (files: ${resolution.conflictFiles.join(", ")})`);
         }
       } catch (resolveErr) {
-        console.error(`[deploy] Conflict resolution failed for ${attempt.branch}: ${(resolveErr as Error).message}`);
+        logger.error(`deploy`, `Conflict resolution failed for ${attempt.branch}: ${(resolveErr as Error).message}`);
       }
     }
 
     if (!commitSha) {
-      console.error(`[deploy] GitHub merge failed for ${attempt.branch}: ${errMsg}`);
+      logger.error(`deploy`, `GitHub merge failed for ${attempt.branch}: ${errMsg}`);
       if (ticket?.jiraKey) {
         await tracker.transitionTicket(ticket.jiraKey, "To Do");
       }
@@ -214,7 +215,7 @@ async function _runDeployAgent(fixAttemptId: string): Promise<DeployResult> {
     }
   }
   if (!commitSha) {
-    console.warn(`[deploy] Merge did not return a commit sha — GitHub may not be configured or branch is missing.`);
+    logger.warn(`deploy`, `Merge did not return a commit sha — GitHub may not be configured or branch is missing.`);
   }
 
   let tag: string | null = null;
@@ -278,7 +279,7 @@ async function _deployBranch(
 
   const readiness = await checkMergeReadiness(ticketIds);
   if (!readiness.ready) {
-    console.warn(`[deploy] Branch ${branch}${jiraRef} not ready to merge — ${readiness.reason}`);
+    logger.warn(`deploy`, `Branch ${branch}${jiraRef} not ready to merge — ${readiness.reason}`);
     if (cycleId) {
       await logAudit({
         cycleId,
@@ -305,15 +306,15 @@ async function _deployBranch(
     const isConflict = vcs.isConflictError(err as Error);
 
     if (isConflict) {
-      console.warn(`[deploy] Merge conflict for ${branch}${jiraRef} — updating branch from ${QA_BRANCH} and retrying once...`);
+      logger.warn(`deploy`, `Merge conflict for ${branch}${jiraRef} — updating branch from ${QA_BRANCH} and retrying once...`);
       try {
         await vcs.updateBranchFromBase(branch, QA_BRANCH);
         commitSha = await vcs.mergeBranch(branch, QA_BRANCH, `fix(${LABEL_PREFIX_SLUG}):${jiraRef} merge ${branch} into ${QA_BRANCH} (conflicts resolved)`);
       } catch (resolveErr) {
-        console.error(`[deploy] Conflict resolution failed: ${(resolveErr as Error).message}`);
+        logger.error(`deploy`, `Conflict resolution failed: ${(resolveErr as Error).message}`);
       }
     } else {
-      console.error(`[deploy] Merge failed for ${branch}${jiraRef}: ${errMsg}`);
+      logger.error(`deploy`, `Merge failed for ${branch}${jiraRef}: ${errMsg}`);
     }
   }
 
@@ -373,11 +374,11 @@ async function _deployBranch(
       try {
         await tracker.transitionTicket(t.jiraKey, "In Review");
       } catch (err) {
-        console.warn(`[deploy] Failed to transition ${t.jiraKey} to In Review:`, (err as Error).message?.slice(0, 200));
+        logger.warn(`deploy`, `Failed to transition ${t.jiraKey} to In Review:`, (err as Error).message?.slice(0, 200));
       }
     }
   }
 
-  console.log(`[deploy] Merged ${branch} into ${QA_BRANCH} — ${allTickets.length} ticket(s) awaiting live verification.`);
+  logger.info(`deploy`, `Merged ${branch} into ${QA_BRANCH} — ${allTickets.length} ticket(s) awaiting live verification.`);
   return { deploymentId: deployment.id, commitSha, tag, ticketsDeployed: allTickets.length, status: "succeeded" };
 }

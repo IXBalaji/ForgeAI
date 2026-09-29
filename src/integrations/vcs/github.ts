@@ -1,6 +1,7 @@
 import "dotenv/config";
 import type { VcsProvider, PullRequestRef, PullRequestStatus, PrReviewComment } from "./types.js";
 import { GitHubAuthError, GitHubApiError } from "./errors.js";
+import { logger } from "../../lib/logger.js";
 
 const MERGEABLE_POLL_ATTEMPTS = 4;
 const MERGEABLE_POLL_DELAY_MS = 1500;
@@ -65,7 +66,7 @@ export class GitHubAdapter implements VcsProvider {
 
   async mergeBranch(head: string, base: string, commitMessage: string): Promise<string | null> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — branch "${head}" was not merged into "${base}".`);
+      logger.warn("github", `GitHub not configured — branch "${head}" was not merged into "${base}".`);
       return null;
     }
     const result = await this.ghFetch(`/repos/${this.owner}/${this.repo}/merges`, {
@@ -81,7 +82,7 @@ export class GitHubAdapter implements VcsProvider {
    */
   async updateBranchFromBase(head: string, base: string): Promise<string | null> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — branch "${head}" was not updated from "${base}".`);
+      logger.warn("github", `GitHub not configured — branch "${head}" was not updated from "${base}".`);
       return null;
     }
     const result = await this.ghFetch(`/repos/${this.owner}/${this.repo}/merges`, {
@@ -98,7 +99,7 @@ export class GitHubAdapter implements VcsProvider {
    */
   async createTag(tagName: string, commitSha: string): Promise<string | null> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — tag "${tagName}" was not created.`);
+      logger.warn("github", `GitHub not configured — tag "${tagName}" was not created.`);
       return null;
     }
     await this.ghFetch(`/repos/${this.owner}/${this.repo}/git/refs`, {
@@ -120,7 +121,7 @@ export class GitHubAdapter implements VcsProvider {
 
   async createPullRequest(head: string, base: string, title: string, body: string): Promise<PullRequestRef | null> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — PR from "${head}" to "${base}" was not created.`);
+      logger.warn("github", `GitHub not configured — PR from "${head}" to "${base}" was not created.`);
       return null;
     }
     const pr = await this.ghFetch(`/repos/${this.owner}/${this.repo}/pulls`, {
@@ -206,7 +207,7 @@ export class GitHubAdapter implements VcsProvider {
 
   async addReviewComments(prNumber: number, comments: PrReviewComment[]): Promise<string | null> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — review comments for PR #${prNumber} were not posted.`);
+      logger.warn("github", `GitHub not configured — review comments for PR #${prNumber} were not posted.`);
       return null;
     }
     const { valid, invalid } = await this.splitCommentsByDiffValidity(prNumber, comments);
@@ -229,7 +230,7 @@ export class GitHubAdapter implements VcsProvider {
 
   async requestChanges(prNumber: number, summary: string, comments: PrReviewComment[] = []): Promise<string | null> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — PR #${prNumber} was not marked Changes Requested.`);
+      logger.warn("github", `GitHub not configured — PR #${prNumber} was not marked Changes Requested.`);
       return null;
     }
     const { valid, invalid } = await this.splitCommentsByDiffValidity(prNumber, comments);
@@ -254,7 +255,7 @@ export class GitHubAdapter implements VcsProvider {
 
   async approvePullRequest(prNumber: number, summary: string): Promise<string | null> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — PR #${prNumber} was not approved.`);
+      logger.warn("github", `GitHub not configured — PR #${prNumber} was not approved.`);
       return null;
     }
     try {
@@ -265,7 +266,7 @@ export class GitHubAdapter implements VcsProvider {
       return review?.id != null ? String(review.id) : null;
     } catch (err) {
       if (this.isSelfApprovalError(err as Error)) {
-        console.warn(`[github] PR #${prNumber} is authored by this same GitHub identity — GitHub disallows self-approval; relying on the internal review verdict instead.`);
+        logger.warn("github", `PR #${prNumber} is authored by this same GitHub identity — GitHub disallows self-approval; relying on the internal review verdict instead.`);
         return null;
       }
       throw err;
@@ -274,7 +275,7 @@ export class GitHubAdapter implements VcsProvider {
 
   async mergePullRequest(prNumber: number, method: "merge" | "squash" = "merge"): Promise<string | null> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — PR #${prNumber} was not merged.`);
+      logger.warn("github", `GitHub not configured — PR #${prNumber} was not merged.`);
       return null;
     }
     const result = await this.ghFetch(`/repos/${this.owner}/${this.repo}/pulls/${prNumber}/merge`, {
@@ -286,7 +287,7 @@ export class GitHubAdapter implements VcsProvider {
 
   async closePullRequest(prNumber: number, reason: string): Promise<void> {
     if (!this.isConfigured()) {
-      console.warn(`[github] GitHub not configured — PR #${prNumber} was not closed.`);
+      logger.warn("github", `GitHub not configured — PR #${prNumber} was not closed.`);
       return;
     }
     try {

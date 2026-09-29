@@ -6,6 +6,7 @@ import { runAgentTrace } from "../observability/agent-tracing.js";
 import { db } from "../db/client.js";
 import { scanRuns, issues, tickets } from "../db/schema.js";
 import { categorize } from "./categorize.js";
+import { logger } from "../lib/logger.js";
 
 export interface JiraSyncResult {
   synced: number;
@@ -25,9 +26,9 @@ async function _syncJiraTickets(opts: {
   maxResults?: number;
 }): Promise<JiraSyncResult> {
   const tracker = getTrackerProvider();
-  console.log(`[sync:jira] Searching tracker for labels=["accessibility"], excludeStatus=["Done"]`);
+  logger.info(`sync:jira`, `Searching tracker for labels=["accessibility"], excludeStatus=["Done"]`);
   const trackerIssues = await tracker.search({ labels: ["accessibility"], excludeStatus: ["Done"] }, opts.maxResults ?? 50);
-  console.log(`[sync:jira] Found ${trackerIssues.length} tracker issue(s)`);
+  logger.info(`sync:jira`, `Found ${trackerIssues.length} tracker issue(s)`);
 
   let synced = 0;
   let skipped = 0;
@@ -62,9 +63,9 @@ async function _syncJiraTickets(opts: {
 
     try {
       const parsed = parseTrackerIssue(trackerIssue);
-      console.log(`[sync:jira] Parsed ${jiraKey}: ruleId="${parsed.ruleId}", impact="${parsed.impact}", pages=${parsed.pages.length}`);
+      logger.info(`sync:jira`, `Parsed ${jiraKey}: ruleId="${parsed.ruleId}", impact="${parsed.impact}", pages=${parsed.pages.length}`);
       for (const page of parsed.pages) {
-        console.log(`[sync:jira]   page: ${page.url} — ${page.selectors.length} selector(s)`);
+        logger.info(`sync:jira`, `  page: ${page.url} — ${page.selectors.length} selector(s)`);
       }
       const issueIds: string[] = [];
 
@@ -99,7 +100,7 @@ async function _syncJiraTickets(opts: {
               .limit(1);
             if (existing) {
               issueIds.push(existing.id);
-              console.log(`[sync:jira]   reusing existing issue ${existing.id} (fingerprint: ${fingerprint.slice(0, 8)})`);
+              logger.info(`sync:jira`, `  reusing existing issue ${existing.id} (fingerprint: ${fingerprint.slice(0, 8)})`);
             }
           }
         }
@@ -114,10 +115,10 @@ async function _syncJiraTickets(opts: {
       });
 
       synced++;
-      console.log(`[sync:jira] Synced ${jiraKey}: ${parsed.ruleId} (${issueIds.length} issue(s))`);
+      logger.info(`sync:jira`, `Synced ${jiraKey}: ${parsed.ruleId} (${issueIds.length} issue(s))`);
     } catch (err) {
       const msg = `Failed to sync ${jiraKey}: ${(err as Error).message}`;
-      console.error(`[sync:jira] ${msg}`);
+      logger.error(`sync:jira`, `${msg}`);
       errors.push(msg);
     }
   }

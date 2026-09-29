@@ -1,6 +1,7 @@
 import type { AggregatedIssue } from "./report-reader.js";
 import { CLASSIFIER_MODEL } from "../lib/config.js";
 import { traceAnthropicMessagesCreate } from "../observability/anthropic-tracing.js";
+import { logger } from "../lib/logger.js";
 
 export type IssueType = "code_change" | "bad_data" | "infrastructure" | "design";
 
@@ -102,12 +103,12 @@ export async function classifyIssues(issues: AggregatedIssue[]): Promise<Classif
       results = JSON.parse(text);
       if (!Array.isArray(results)) results = [results];
     } catch {
-      console.warn("[classifier] Failed to parse LLM response, falling back to heuristic classification");
-      console.warn("[classifier] Raw response:", raw.slice(0, 300));
+      logger.warn("classifier", "Failed to parse LLM response, falling back to heuristic classification");
+      logger.warn("classifier", "Raw response:", raw.slice(0, 300));
       return fallbackClassify(issues);
     }
   } catch (err) {
-    console.warn(`[classifier] LLM call failed (${(err as Error).message}), falling back to heuristic classification`);
+    logger.warn(`classifier`, `LLM call failed (${(err as Error).message}), falling back to heuristic classification`);
     return fallbackClassify(issues);
   }
 

@@ -7,6 +7,7 @@ import type { Severity } from "../types/index.js";
 import { runAxeScan, fingerprintFinding, type RawFinding } from "./axe-scan.js";
 import { runPa11yScan } from "./pa11y-scan.js";
 import { runVisionScan } from "./vision-scan.js";
+import { logger } from "../lib/logger.js";
 
 export interface AuthRole {
   label: string;
@@ -128,7 +129,7 @@ async function _runScannerAgent(opts: ScannerOptions): Promise<ScannerResult> {
 
   for (const result of settled) {
     if (result.status === "rejected") {
-      console.warn("[scanner] a scan source failed — continuing with the others:", result.reason);
+      logger.warn("scanner", "a scan source failed — continuing with the others:", result.reason);
       continue;
     }
     for (const finding of result.value) {

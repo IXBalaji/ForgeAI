@@ -6,6 +6,7 @@ import { buildTicketPayloads } from "./ticket-builder.js";
 import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { LABEL_PREFIX } from "../lib/config.js";
 import { confirmTicketFixed } from "../deploy/deploy-agent.js";
+import { logger } from "../lib/logger.js";
 
 const tracker = getTrackerProvider();
 import { and, eq, inArray } from "drizzle-orm";
@@ -83,7 +84,7 @@ async function verifyInReviewTickets(epicKey: string | null, freshFingerprints: 
       for (const i of ticketIssues) {
         await db.update(issues).set({ status: "resolved" }).where(eq(issues.id, i.id));
       }
-      console.log(`[triage] Verified fixed: ${t.jiraKey ?? t.id} (category "${t.category}") — ${ticketIssues.length} issue(s) no longer reproduce.`);
+      logger.info(`triage`, `Verified fixed: ${t.jiraKey ?? t.id} (category "${t.category}") — ${ticketIssues.length} issue(s) no longer reproduce.`);
     } else {
       await db
         .update(ticketsTable)
@@ -93,10 +94,10 @@ async function verifyInReviewTickets(epicKey: string | null, freshFingerprints: 
         try {
           await tracker.transitionTicket(t.jiraKey, "To Do");
         } catch (err) {
-          console.warn(`[triage] Failed to transition ${t.jiraKey} to To Do: ${(err as Error).message}`);
+          logger.warn(`triage`, `Failed to transition ${t.jiraKey} to To Do: ${(err as Error).message}`);
         }
       }
-      console.log(`[triage] Not fixed yet: ${t.jiraKey ?? t.id} (category "${t.category}") — ${stillFailing.length}/${ticketIssues.length} issue(s) still reproduce.`);
+      logger.info(`triage`, `Not fixed yet: ${t.jiraKey ?? t.id} (category "${t.category}") — ${stillFailing.length}/${ticketIssues.length} issue(s) still reproduce.`);
     }
   }
 }
@@ -110,12 +111,12 @@ export async function triageFromReports(opts: {
 }): Promise<TriageFromReportsResult> {
   const reportDir = opts.reportDir ?? path.join(process.cwd(), "a11y-reports");
 
-  console.log(`[triage] Reading reports from ${reportDir}`);
+  logger.info(`triage`, `Reading reports from ${reportDir}`);
   const pages = readReportDir(reportDir);
-  console.log(`[triage] Found ${pages.length} page reports`);
+  logger.info(`triage`, `Found ${pages.length} page reports`);
 
   const aggregated = aggregateByRule(pages);
-  console.log(`[triage] Aggregated into ${aggregated.length} unique violation types`);
+  logger.info(`triage`, `Aggregated into ${aggregated.length} unique violation types`);
 
   let epicKey: string | null = opts.epicKey ?? null;
   if (!epicKey && opts.cycleId && !opts.dryRun) {
@@ -139,7 +140,7 @@ export async function triageFromReports(opts: {
   }
 
   if (aggregated.length === 0) {
-    console.log("[triage] No violations found — nothing to triage");
+    logger.info("triage", "No violations found — nothing to triage");
     return {
       epicKey,
       tickets: [],
@@ -148,7 +149,7 @@ export async function triageFromReports(opts: {
     };
   }
 
-  console.log("[triage] Classifying issues with LLM...");
+  logger.info("triage", "Classifying issues with LLM...");
   const classified = await classifyIssues(aggregated);
 
   const payloads = buildTicketPayloads(classified, LABEL_PREFIX, pages);
@@ -195,7 +196,7 @@ export async function triageFromReports(opts: {
           if (doneTicket.jiraKey) {
             await tracker.transitionTicket(doneTicket.jiraKey, "To Do");
           }
-          console.log(`[triage] Reopened previously-done ticket ${doneTicket.jiraKey ?? doneTicket.id} for category "${category}" — violation resurfaced`);
+          logger.info(`triage`, `Reopened previously-done ticket ${doneTicket.jiraKey ?? doneTicket.id} for category "${category}" — violation resurfaced`);
           existingForJira = { ...doneTicket, status: "open", issueIds: [], epicKey };
         }
       }
@@ -210,9 +211,9 @@ export async function triageFromReports(opts: {
             labels: payload.labels,
             priority: payload.priority as "P1" | "P2" | "P3" | "P4" | undefined,
           });
-          console.log(`[triage] Updated existing Jira ticket ${jiraKey} for category "${category}" with fresh scan data`);
+          logger.info(`triage`, `Updated existing Jira ticket ${jiraKey} for category "${category}" with fresh scan data`);
         } catch (err) {
-          console.warn(`[triage] Failed to update ${jiraKey}: ${(err as Error).message}`);
+          logger.warn(`triage`, `Failed to update ${jiraKey}: ${(err as Error).message}`);
         }
       } else {
         let existingJiraKey = await tracker.findExisting({
@@ -236,9 +237,9 @@ export async function triageFromReports(opts: {
               labels: payload.labels,
               priority: payload.priority as "P1" | "P2" | "P3" | "P4" | undefined,
             });
-            console.log(`[triage] Found and updated existing Jira ticket ${jiraKey} for category "${category}"`);
+            logger.info(`triage`, `Found and updated existing Jira ticket ${jiraKey} for category "${category}"`);
           } catch (err) {
-            console.warn(`[triage] Failed to update ${jiraKey}: ${(err as Error).message}`);
+            logger.warn(`triage`, `Failed to update ${jiraKey}: ${(err as Error).message}`);
           }
         } else {
           try {
@@ -250,10 +251,10 @@ export async function triageFromReports(opts: {
               priority: payload.priority as "P1" | "P2" | "P3" | "P4" | undefined,
             });
             if (jiraKey) {
-              console.log(`[triage] Created ${jiraKey}: ${payload.summary}`);
+              logger.info(`triage`, `Created ${jiraKey}: ${payload.summary}`);
             }
           } catch (err) {
-            console.error(`[triage] Failed to create Jira ticket: ${(err as Error).message}`);
+            logger.error(`triage`, `Failed to create Jira ticket: ${(err as Error).message}`);
           }
         }
       }
@@ -289,11 +290,11 @@ export async function triageFromReports(opts: {
                 .limit(1);
               if (existing) {
                 issueIds.push(existing.id);
-                console.log(`[triage] Reusing existing issue ${existing.id} for fingerprint ${fingerprint.slice(0, 8)}`);
+                logger.info(`triage`, `Reusing existing issue ${existing.id} for fingerprint ${fingerprint.slice(0, 8)}`);
               }
             }
           } catch (err) {
-            console.warn(`[triage] Skipped duplicate issue: ${fingerprint.slice(0, 8)}`);
+            logger.warn(`triage`, `Skipped duplicate issue: ${fingerprint.slice(0, 8)}`);
           }
         }
       }
@@ -306,7 +307,7 @@ export async function triageFromReports(opts: {
       if (existingTicket) {
         const mergedIds = [...new Set([...(existingTicket.issueIds as string[]), ...issueIds])];
         await db.update(ticketsTable).set({ issueIds: mergedIds, epicKey }).where(eq(ticketsTable.id, existingTicket.id));
-        console.log(`[triage] Merged ${issueIds.length} issue(s) into existing ticket ${existingTicket.jiraKey ?? existingTicket.id} (category: ${category}, total: ${mergedIds.length})`);
+        logger.info(`triage`, `Merged ${issueIds.length} issue(s) into existing ticket ${existingTicket.jiraKey ?? existingTicket.id} (category: ${category}, total: ${mergedIds.length})`);
       } else if (issueIds.length > 0 || jiraKey) {
         await db.insert(ticketsTable).values({
           jiraKey,
@@ -316,15 +317,15 @@ export async function triageFromReports(opts: {
           status: "open",
         });
         dbTicketsCreated++;
-        console.log(`[triage] Created ticket for "${category}" — jiraKey: ${jiraKey}, issueIds: ${issueIds.length}`);
+        logger.info(`triage`, `Created ticket for "${category}" — jiraKey: ${jiraKey}, issueIds: ${issueIds.length}`);
         if (issueIds.length === 0) {
-          console.warn(`[triage] ⚠ Ticket "${category}" (${jiraKey}) created with 0 issueIds — the developer agent will skip it.`);
+          logger.warn(`triage`, `⚠ Ticket "${category}" (${jiraKey}) created with 0 issueIds — the developer agent will skip it.`);
         }
       }
     } else {
-      console.log(`[triage] [dry-run] Would create: ${payload.summary}`);
-      console.log(`         Type: ${payload.issueType} | Priority: ${payload.priority} | Impact: ${payload.classified.impact}`);
-      console.log(`         Pages: ${payload.classified.affectedPages.length} | Elements: ${payload.classified.totalNodeCount}`);
+      logger.info(`triage`, `[dry-run] Would create: ${payload.summary}`);
+      logger.info("triage", `         Type: ${payload.issueType} | Priority: ${payload.priority} | Impact: ${payload.classified.impact}`);
+      logger.info("triage", `         Pages: ${payload.classified.affectedPages.length} | Elements: ${payload.classified.totalNodeCount}`);
     }
 
     resultTickets.push({

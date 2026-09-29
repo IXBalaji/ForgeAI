@@ -1,5 +1,6 @@
 import type { RawFinding } from "./axe-scan.js";
 import type { Severity } from "../types/index.js";
+import { logger } from "../lib/logger.js";
 
 const PA11Y_TYPE_TO_SEVERITY: Record<string, Severity> = {
   error: "serious",
@@ -61,7 +62,7 @@ export async function runPa11yScan(baseUrl: string, routes: string[], options?: 
         });
       }
     } catch (err) {
-      console.warn(`[pa11y] failed on ${pageUrl} — skipping this route:`, (err as Error).message);
+      logger.warn(`pa11y`, `failed on ${pageUrl} — skipping this route:`, (err as Error).message);
     }
   }
   return findings;

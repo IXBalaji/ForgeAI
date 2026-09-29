@@ -5,6 +5,7 @@ import { issues, tickets } from "../db/schema.js";
 import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { LABEL_PREFIX } from "../lib/config.js";
 import { categorize } from "./categorize.js";
+import { logger } from "../lib/logger.js";
 
 const tracker = getTrackerProvider();
 
@@ -101,7 +102,7 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
         if (doneTicket.jiraKey) {
           await tracker.transitionTicket(doneTicket.jiraKey, "To Do");
         }
-        console.log(`[triage] Reopened previously-done ticket ${doneTicket.jiraKey ?? doneTicket.id} for category "${category}" — violation resurfaced`);
+        logger.info(`triage`, `Reopened previously-done ticket ${doneTicket.jiraKey ?? doneTicket.id} for category "${category}" — violation resurfaced`);
         existing = { ...doneTicket, status: "open", issueIds: [], epicKey };
       }
     }
@@ -129,9 +130,9 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
             labels: [LABEL_PREFIX, ...wcagRules.map((r) => `a11y:${r}`)],
             priority: priorityMap[highestSeverity] as "P1" | "P2" | "P3" | "P4" | undefined,
           });
-          console.log(`[triage] Updated Jira ticket ${existing.jiraKey} for category "${category}" with ${mergedIssueIds.length} issue(s)`);
+          logger.info(`triage`, `Updated Jira ticket ${existing.jiraKey} for category "${category}" with ${mergedIssueIds.length} issue(s)`);
         } catch (err) {
-          console.warn(`[triage] Failed to update Jira ticket ${existing.jiraKey}: ${(err as Error).message}`);
+          logger.warn(`triage`, `Failed to update Jira ticket ${existing.jiraKey}: ${(err as Error).message}`);
         }
       }
       ticketsUpdated += 1;
@@ -146,7 +147,7 @@ async function _runTriageAgent(scanRunId: string, epicKey: string | null): Promi
           priority: priorityMap[highestSeverity] as "P1" | "P2" | "P3" | "P4" | undefined,
         });
       } catch (err) {
-        console.warn(`[triage] Failed to create Jira ticket for "${category}" — continuing locally:`, (err as Error).message);
+        logger.warn(`triage`, `Failed to create Jira ticket for "${category}" — continuing locally:`, (err as Error).message);
       }
 
       await db.insert(tickets).values({

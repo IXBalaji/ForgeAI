@@ -1,6 +1,7 @@
 import { traceAnthropicAgentSdkQuery } from "../observability/anthropic-tracing.js";
 import { run } from "../lib/exec.js";
 import { REVIEWER_MODEL, REVIEWER_EFFORT } from "../lib/config.js";
+import { logger } from "../lib/logger.js";
 
 const QA_BRANCH = `origin/${process.env.GITHUB_QA_BRANCH ?? "qa"}`;
 
@@ -127,11 +128,11 @@ export async function adversarialReview(worktreeDir: string, acceptanceCriteria?
 
     const findings = parseFindings(reviewText);
     if (findings.length > 0) {
-      console.warn(`[adversarial-review] ${findings.length} finding(s) raised (${findings.filter((f) => f.severity === "blocking").length} blocking).`);
+      logger.warn(`adversarial-review`, `${findings.length} finding(s) raised (${findings.filter((f) => f.severity === "blocking").length} blocking).`);
     }
     return findings;
   } catch (err) {
-    console.warn("[adversarial-review] Failed to run — not blocking on it.", err);
+    logger.warn("adversarial-review", "Failed to run — not blocking on it.", err);
     return [];
   }
 }

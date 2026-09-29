@@ -1,11 +1,12 @@
 import { sendErrorAlertEmail } from "../integrations/email.js";
 import { redactSecrets } from "../observability/sanitize.js";
 import { logAudit } from "./audit-log.js";
+import { logger } from "./logger.js";
 
 export async function notifySlack(text: string): Promise<void> {
   const url = process.env.SLACK_WEBHOOK_URL;
   if (!url) {
-    console.log("[notify] SLACK_WEBHOOK_URL not set — report only printed to console.");
+    logger.info("notify", "SLACK_WEBHOOK_URL not set — report only printed to console.");
     return;
   }
   await fetch(url, {
@@ -39,7 +40,7 @@ export async function notifyUnrecoverableError(ctx: UnrecoverableErrorContext): 
   try {
     await notifySlack(summaryLine);
   } catch (err) {
-    console.warn("[notify] Failed to post Slack alert:", (err as Error).message?.slice(0, 200));
+    logger.warn("notify", "Failed to post Slack alert:", (err as Error).message?.slice(0, 200));
   }
 
   try {
@@ -53,7 +54,7 @@ export async function notifyUnrecoverableError(ctx: UnrecoverableErrorContext): 
     ].filter(Boolean);
     await sendErrorAlertEmail(`Unrecoverable error in cycle ${ctx.cycleId}`, detailLines.join("\n\n"));
   } catch (err) {
-    console.warn("[notify] Failed to send error alert email:", (err as Error).message?.slice(0, 200));
+    logger.warn("notify", "Failed to send error alert email:", (err as Error).message?.slice(0, 200));
   }
 
   await logAudit({

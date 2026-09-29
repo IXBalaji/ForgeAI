@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { eq, inArray, desc } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { tickets, issues, fixAttempts, reviewResults } from "../db/schema.js";
+import { logger } from "../lib/logger.js";
 const TARGET_REPO_PATH = process.env.TARGET_REPO_PATH ?? "";
 const REPORT_DIR = process.env.A11Y_REPORT_DIR ?? join(process.cwd(), "a11y-reports");
 
@@ -93,18 +94,18 @@ export async function buildUserPrompt(ticketId: string): Promise<string> {
     })
     .join("\n");
 
-  console.log(`[prompt-builder] Ticket ${ticketId} (${ticket.jiraKey ?? "no-jira-key"}) category="${ticket.category}"`);
-  console.log(`[prompt-builder]   issueIds in ticket: ${(ticket.issueIds as string[]).length}, issues found in DB: ${ticketIssues.length}`);
+  logger.info(`prompt-builder`, `Ticket ${ticketId} (${ticket.jiraKey ?? "no-jira-key"}) category="${ticket.category}"`);
+  logger.info(`prompt-builder`, `  issueIds in ticket: ${(ticket.issueIds as string[]).length}, issues found in DB: ${ticketIssues.length}`);
   if (ticketIssues.length === 0) {
-    console.warn(`[prompt-builder]   ⚠ No issues resolved from issueIds — the SDK agent will have no findings to act on.`);
-    console.warn(`[prompt-builder]   issueIds: ${JSON.stringify(ticket.issueIds)}`);
+    logger.warn(`prompt-builder`, `  ⚠ No issues resolved from issueIds — the SDK agent will have no findings to act on.`);
+    logger.warn(`prompt-builder`, `  issueIds: ${JSON.stringify(ticket.issueIds)}`);
   } else {
     for (const i of ticketIssues) {
-      console.log(`[prompt-builder]   - ${i.wcagRule} | "${i.selector}" | ${i.pageUrl} (${i.severity})`);
+      logger.info(`prompt-builder`, `  - ${i.wcagRule} | "${i.selector}" | ${i.pageUrl} (${i.severity})`);
     }
   }
   if (priorFeedback.length > 0) {
-    console.log(`[prompt-builder]   Prior rejected attempts: ${priorFeedback.length}`);
+    logger.info(`prompt-builder`, `  Prior rejected attempts: ${priorFeedback.length}`);
   }
 
   return [

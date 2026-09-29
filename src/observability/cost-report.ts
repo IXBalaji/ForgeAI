@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { Client } from "langsmith";
+import { logger } from "../lib/logger.js";
 
 interface AgentUsage {
   agent: string;
@@ -18,12 +19,12 @@ export async function generateCostReport(options: {
   const projectName = options.project ?? process.env.LANGSMITH_PROJECT;
 
   if (!projectName) {
-    console.error("[cost-report] No project specified. Set LANGSMITH_PROJECT in .env or pass --project.");
+    logger.error("cost-report", "No project specified. Set LANGSMITH_PROJECT in .env or pass --project.");
     return;
   }
 
   if (!process.env.LANGSMITH_API_KEY) {
-    console.error("[cost-report] LANGSMITH_API_KEY is not set.");
+    logger.error("cost-report", "LANGSMITH_API_KEY is not set.");
     return;
   }
 
