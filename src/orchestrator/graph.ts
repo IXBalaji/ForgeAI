@@ -30,7 +30,7 @@ import { StateGraph, Annotation, START, END } from "@langchain/langgraph";
 import { PostgresSaver } from "@langchain/langgraph-checkpoint-postgres";
 import { db } from "../db/client.js";
 import { tickets, issues, iterationCycles, fixAttempts, reportsGenerated } from "../db/schema.js";
-import { eq, and, inArray, notInArray } from "drizzle-orm";
+import { eq, and, inArray, notInArray, isNull } from "drizzle-orm";
 import { triageFromReports } from "../triage/triage-from-reports.js";
 import { fixTicketOnBranch, fixBuildErrors, recordFixAttempts, type BatchFixResult } from "../development/developer-agent.js";
 import { reviewBranch } from "../review/reviewer-agent.js";
@@ -46,7 +46,10 @@ import { SilentLangGraphTracer } from "../observability/silent-langgraph-tracer.
 import { run } from "../lib/exec.js";
 import { gitRepoMutex } from "../lib/mutex.js";
 import { withRetry } from "../lib/retry.js";
-import { assertTargetRepoConfigured, ensureFreshQaBase } from "../lib/repo-config.js";
+import { assertTargetRepoConfigured, ensureFreshQaBase, assertRepoReadyForCycle } from "../lib/repo-config.js";
+import { validateConfig } from "../lib/preflight.js";
+import { runWithCycleLogger, logger } from "../lib/logger.js";
+import { categorizeCycleFailure } from "./failure-category.js";
 import { LABEL_PREFIX, LABEL_PREFIX_SLUG } from "../lib/config.js";
 import { logAudit } from "../lib/audit-log.js";
 import { notifyUnrecoverableError } from "../lib/notify.js";
@@ -816,14 +819,6 @@ export async function runOrchestratorCycle(existingCycleId?: string, mode: Cycle
 }
 
 async function _runOrchestratorCycle(existingCycleId?: string, mode: CycleMode = "full") {
-  const { initObservability } = await import("../integrations/observability.js");
-  await initObservability();
-
-  const checkpointer = PostgresSaver.fromConnString(process.env.DATABASE_URL!);
-  await checkpointer.setup();
-
-  const compiled = buildGraph().compile({ checkpointer });
-
   // When a caller (e.g. the web app's start API route) has already inserted
   // the iteration_cycles row so it can hand back the run id synchronously,
   // reuse that row instead of creating a second one. That row's own "mode"
@@ -845,35 +840,71 @@ async function _runOrchestratorCycle(existingCycleId?: string, mode: CycleMode =
 
   const cycleMode = (cycle.mode as CycleMode | undefined) ?? mode;
 
-  console.log(`[orchestrate] Starting pipeline — cycle ${cycle.id} (mode: ${cycleMode})`);
-  console.log(`[orchestrate] Flow: recoverDanglingWork → scan → [mode=scan? finish : triage (verify + decide)] → [mode=triage? preProcessEmail → finish : preProcessEmail → prepareBranch → fix (all tickets) → push → reviewBranch → mergeBranch (direct, no PR) / fixBranch (autofix) → cleanup → scan → triage → [all resolved?] → release (PR to main + email), else continue]`);
+  await runWithCycleLogger(cycle.id, async () => {
+    try {
+      validateConfig({
+        db: true,
+        repo: cycleMode !== "scan",
+        jira: cycleMode !== "scan",
+        github: cycleMode === "full",
+      });
 
-  await runWithPipelineContext({ pipeline_run_id: cycle.id, cycle_number: 0 }, async () =>
-    runIssueResolutionPipeline(async () => {
-      await compiled.invoke(
-        {
-          cycleId: cycle.id,
-          cycleNumber: 0,
-          mode: cycleMode,
-          epicKey: null,
-          branch: null,
-          worktreeDir: null,
-          openTicketIds: [],
-          fixedTicketIds: [],
-          currentTicketIndex: 0,
-          reviewVerdict: null,
-          reviewComments: null,
-          retryCount: 0,
-          freshScan: true,
-        },
-        {
-          configurable: { thread_id: cycle.id },
-          // Suppresses LangGraph's internal run tracing (_start_, ChannelWrite, node
-          // wrapper runs) — the meaningful agent.* / anthropic.* runs attach directly
-          // to the root "ForgeAI" run instead (see agent-tracing.ts).
-          callbacks: [new SilentLangGraphTracer()],
-        },
+      logger.info("orchestrate", `Starting pipeline — cycle ${cycle.id} (mode: ${cycleMode})`);
+      logger.info(
+        "orchestrate",
+        `Flow: recoverDanglingWork → scan → [mode=scan? finish : triage (verify + decide)] → [mode=triage? preProcessEmail → finish : preProcessEmail → prepareBranch → fix (all tickets) → push → reviewBranch → mergeBranch (direct, no PR) / fixBranch (autofix) → cleanup → scan → triage → [all resolved?] → release (PR to main + email), else continue]`,
       );
-    }),
-  );
+
+      if (cycleMode === "full") {
+        await assertRepoReadyForCycle();
+      }
+
+      const { initObservability } = await import("../integrations/observability.js");
+      await initObservability();
+
+      const checkpointer = PostgresSaver.fromConnString(process.env.DATABASE_URL!);
+      await checkpointer.setup();
+
+      const compiled = buildGraph().compile({ checkpointer });
+
+      await runWithPipelineContext({ pipeline_run_id: cycle.id, cycle_number: 0 }, async () =>
+        runIssueResolutionPipeline(async () => {
+          await compiled.invoke(
+            {
+              cycleId: cycle.id,
+              cycleNumber: 0,
+              mode: cycleMode,
+              epicKey: null,
+              branch: null,
+              worktreeDir: null,
+              openTicketIds: [],
+              fixedTicketIds: [],
+              currentTicketIndex: 0,
+              reviewVerdict: null,
+              reviewComments: null,
+              retryCount: 0,
+              freshScan: true,
+            },
+            {
+              configurable: { thread_id: cycle.id },
+              // Suppresses LangGraph's internal run tracing (_start_, ChannelWrite, node
+              // wrapper runs) — the meaningful agent.* / anthropic.* runs attach directly
+              // to the root "ForgeAI" run instead (see agent-tracing.ts).
+              callbacks: [new SilentLangGraphTracer()],
+            },
+          );
+        }),
+      );
+    } catch (err) {
+      const { category, reason } = categorizeCycleFailure(err);
+      logger.error("orchestrate", `Cycle ${cycle.id} failed (${category}): ${reason}`, err);
+      logger.error("orchestrate", `CYCLE_FAILED: ${category} | ${reason}`);
+      throw err;
+    } finally {
+      await db
+        .update(iterationCycles)
+        .set({ endedAt: new Date() })
+        .where(and(eq(iterationCycles.id, cycle.id), isNull(iterationCycles.endedAt)));
+    }
+  });
 }
