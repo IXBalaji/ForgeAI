@@ -28,6 +28,9 @@ export default function RootLayout({
               <Link href="/settings" className="site-nav__link">
                 Settings
               </Link>
+              <Link href="/logs" className="site-nav__link">
+                Logs
+              </Link>
               <Link href="/about" className="site-nav__link">
                 About
               </Link>
