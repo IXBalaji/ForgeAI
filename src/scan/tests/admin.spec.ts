@@ -39,6 +39,32 @@ test.describe("Admin role", () => {
     });
   });
 
+  // Inactive tab panels are `hidden`, and axe skips hidden elements — the
+  // test above only covers the default "Basic Info" tab, so scan the rest.
+  const EMPLOYEE_FORM_TABS = [
+    { name: "Contact", slug: "contact" },
+    { name: "Job Details", slug: "job" },
+    { name: "Statutory & Payroll", slug: "statutory" },
+    { name: "Emergency Contact", slug: "emergency" },
+    { name: "Leave Policy", slug: "leave" },
+  ];
+
+  for (const tab of EMPLOYEE_FORM_TABS) {
+    test(`add employee form — ${tab.name} tab`, async ({ page }, testInfo) => {
+      await goToNavLink(page, "Employees", "Employees");
+      await page.getByRole("link", { name: "Add employee" }).click();
+      await expect(page.getByRole("heading", { level: 1, name: "Add employee" })).toBeVisible();
+      await page.getByRole("tab", { name: tab.name, exact: true }).click();
+      await expect(page.getByRole("tab", { name: tab.name, exact: true })).toHaveAttribute("aria-selected", "true");
+
+      await runAxeScan(page, testInfo, {
+        label: `Add employee form — ${tab.name} tab (admin)`,
+        fileSlug: `admin-employee-create-${tab.slug}`,
+        tags: AXE_TAGS,
+      });
+    });
+  }
+
   test("departments", async ({ page }, testInfo) => {
     await goToNavLink(page, "Departments", "Departments");
     await runAxeScan(page, testInfo, {

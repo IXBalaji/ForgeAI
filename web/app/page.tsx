@@ -4,7 +4,8 @@ import { useEffect, useState } from "react";
 import { Hero } from "@/components/hero";
 import { StartWorkflowButton } from "@/components/start-workflow-button";
 import { StageTimeline } from "@/components/stage-timeline";
-import { ResultsSummary } from "@/components/results-summary";
+import { RunResults } from "@/components/run-results";
+import { RunProgress } from "@/components/run-progress";
 import { ErrorPanel } from "@/components/error-panel";
 import type { RunStatus } from "@/lib/types";
 
@@ -178,36 +179,7 @@ export default function Home() {
           mode={status.mode}
           loopIterationHint={status.loopIterationHint}
         />
-        <div className="stats-grid">
-          <div className="stat">
-            <div className="stat-value">{status.counts.ticketsOpen}</div>
-            <div className="stat-label">Open</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.ticketsInProgress}</div>
-            <div className="stat-label">In Progress</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.ticketsInReview}</div>
-            <div className="stat-label">In Review</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.ticketsDone}</div>
-            <div className="stat-label">Done</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.fixAttempts}</div>
-            <div className="stat-label">Fix Attempts</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.reviewsApproved}</div>
-            <div className="stat-label">Approved</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.deployments}</div>
-            <div className="stat-label">Deployments</div>
-          </div>
-        </div>
+        <RunProgress status={status} />
       </main>
     );
   }
@@ -224,37 +196,7 @@ export default function Home() {
           allCompleted={!status.failed}
           mode={status.mode}
         />
-        <div className="stats-grid">
-          <div className="stat">
-            <div className="stat-value">{status.counts.ticketsOpen}</div>
-            <div className="stat-label">Open</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.ticketsInProgress}</div>
-            <div className="stat-label">In Progress</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.ticketsInReview}</div>
-            <div className="stat-label">In Review</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.ticketsDone}</div>
-            <div className="stat-label">Done</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.fixAttempts}</div>
-            <div className="stat-label">Fix Attempts</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.reviewsApproved}</div>
-            <div className="stat-label">Approved</div>
-          </div>
-          <div className="stat">
-            <div className="stat-value">{status.counts.deployments}</div>
-            <div className="stat-label">Deployments</div>
-          </div>
-        </div>
-        <ResultsSummary status={status} onStartAnother={handleStartAnother} />
+        <RunResults status={status} onStartAnother={handleStartAnother} />
       </main>
     );
   }

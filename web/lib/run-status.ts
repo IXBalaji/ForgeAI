@@ -117,6 +117,15 @@ export async function deriveRunStatus(
   };
 }
 
+/**
+ * Tickets belonging to a cycle — the same heuristic as the queries above:
+ * created during the run, or attached to its epic (reused tickets get the
+ * current epicKey reassigned by triage).
+ */
+export function cycleTicketsCondition(startedAt: Date, epicKey: string | null) {
+  return epicKey ? or(gte(tickets.createdAt, startedAt), eq(tickets.epicKey, epicKey)) : gte(tickets.createdAt, startedAt);
+}
+
 async function deriveStageFromDB(startedAt: Date, epicKey: string | null, logLines: string[], database: NonNullable<typeof db>): Promise<Stage> {
   const logStage = inferStageFromLog(logLines);
 

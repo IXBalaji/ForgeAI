@@ -1,4 +1,4 @@
-import { Page, TestInfo } from "@playwright/test";
+import { Page, TestInfo, expect } from "@playwright/test";
 import { AxeBuilder } from "@axe-core/playwright";
 import fs from "fs";
 import path from "path";
@@ -13,6 +13,23 @@ export function ensureReportDir() {
 const _resolved = resolveAxeConfig();
 export const AXE_TAGS: string[] = _resolved.tags;
 
+const LOADING_TEXT = "Loading…";
+const LOADING_TIMEOUT_MS = 15000;
+
+/**
+ * Data-driven pages render their heading immediately and a "Loading…"
+ * placeholder until the API responds — scanning at that point audits an
+ * empty table. Waits for every loading placeholder to disappear; on timeout
+ * it warns and scans anyway so a slow API never fails the test.
+ */
+async function waitForContentLoaded(page: Page, label: string) {
+  try {
+    await expect(page.getByText(LOADING_TEXT, { exact: true })).toHaveCount(0, { timeout: LOADING_TIMEOUT_MS });
+  } catch {
+    console.warn(`[a11y] ${label}: still showing "${LOADING_TEXT}" after ${LOADING_TIMEOUT_MS / 1000}s — scanning anyway.`);
+  }
+}
+
 export async function runAxeScan(
   page: Page,
   testInfo: TestInfo,
@@ -22,6 +39,7 @@ export async function runAxeScan(
     throw new Error(`runAxeScan("${options.fileSlug}"): pass tags OR rules, not both`);
   }
   ensureReportDir();
+  await waitForContentLoaded(page, options.label);
 
   let builder = new AxeBuilder({ page });
   if (options.tags) builder = builder.withTags(options.tags);

@@ -48,6 +48,60 @@ export interface RunStatus {
   logsByStage: Record<Stage, string[]>;
 }
 
+export type Severity = "critical" | "serious" | "moderate" | "minor";
+
+export type TicketStatus = "open" | "in_progress" | "in_review" | "parked" | "flagged" | "done";
+
+export interface IssueNode {
+  selector: string;
+  html: string;
+  failureSummary: string | null;
+}
+
+export interface IssueGroup {
+  ruleId: string;
+  severity: Severity;
+  help: string;
+  helpUrl: string;
+  wcag: string[];
+  elementCount: number;
+  pageCount: number;
+  pages: Array<{ url: string; state: string; nodes: IssueNode[] }>;
+}
+
+export interface ScanResults {
+  /** false when no report from this run's time window is on disk (e.g. overwritten by a later run). */
+  available: boolean;
+  statesScanned: number;
+  pagesScanned: number;
+  elementCount: number;
+  bySeverity: Record<Severity, number>;
+  groups: IssueGroup[];
+}
+
+export interface TicketRow {
+  id: string;
+  jiraKey: string | null;
+  jiraUrl: string | null;
+  category: string;
+  status: TicketStatus;
+  /** Created during this run, as opposed to an existing ticket refreshed with new scan data. */
+  isNew: boolean;
+  severity: Severity | null;
+  issueCount: number;
+  pageCount: number;
+  attempts: number;
+  reviewVerdict: "approved" | "rejected" | null;
+  prUrl: string | null;
+}
+
+export interface RunResults {
+  mode: RunMode;
+  scan: ScanResults;
+  /** null for scan-only runs — no tickets are created. */
+  tickets: TicketRow[] | null;
+}
+
 export interface ActiveRun {
   active: boolean | "stalled";
   cycleId?: string;
