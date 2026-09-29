@@ -8,3 +8,4 @@ test-results/
 a11y-reports/
 playwright/.auth/
 reports/
+logger/
