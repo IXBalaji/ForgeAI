@@ -21,6 +21,29 @@ const MAIN_BRANCH = process.env.GITHUB_BASE_BRANCH ?? "main";
 
 const vcs = getVcsProvider();
 
+export class ReleaseError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReleaseError";
+  }
+}
+
+export async function createReleasePr(
+  vcs: ReturnType<typeof getVcsProvider>,
+  head: string,
+  base: string,
+  title: string,
+  body: string,
+): Promise<{ number: number; htmlUrl: string } | null> {
+  try {
+    return await vcs.createPullRequest(head, base, title, body);
+  } catch (err) {
+    throw new ReleaseError(
+      `Pull request could not be created: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 /**
  * Release agent — compiles fixed/parked/flagged into the post-process report
  * (with the timestamped final report attached), generates the final report
@@ -80,7 +103,7 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
         "",
         ...jiraKeys.map((k) => `- ${k}`),
       ];
-      releasePr = await vcs.createPullRequest(QA_BRANCH, MAIN_BRANCH, title, bodyLines.join("\n"));
+      releasePr = await createReleasePr(vcs, QA_BRANCH, MAIN_BRANCH, title, bodyLines.join("\n"));
       console.log(`[release] Created release PR ${releasePr?.htmlUrl ?? "(vcs not configured)"} (${QA_BRANCH} → ${MAIN_BRANCH}).`);
     } else {
       console.log(`[release] Reusing existing open release PR #${releasePr.number} (${QA_BRANCH} → ${MAIN_BRANCH}).`);
