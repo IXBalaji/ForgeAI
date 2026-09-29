@@ -12,6 +12,7 @@ import { getTrackerProvider } from "../integrations/tracker/factory.js";
 import { getVcsProvider } from "../integrations/vcs/factory.js";
 import { runOrchestratorCycle, type CycleMode } from "../orchestrator/graph.js";
 import { initObservability, withSpan } from "../integrations/observability.js";
+import { logger } from "../lib/logger.js";
 import { db } from "../db/client.js";
 import { iterationCycles } from "../db/schema.js";
 
@@ -383,4 +384,7 @@ program
     await runOrchestratorCycle(opts.cycleId, opts.mode as CycleMode);
   });
 
-program.parseAsync(process.argv);
+program.parseAsync(process.argv).catch((err) => {
+  logger.error("cli", "Command failed", err);
+  process.exitCode = 1;
+});
