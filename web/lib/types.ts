@@ -46,6 +46,8 @@ export interface RunStatus {
     prUrl: string | null;
   } | null;
   logsByStage: Record<Stage, string[]>;
+  failureCategory: string | null;
+  failureReason: string | null;
 }
 
 export type Severity = "critical" | "serious" | "moderate" | "minor";

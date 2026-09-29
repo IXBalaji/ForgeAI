@@ -84,6 +84,7 @@ export async function deriveRunStatus(
         prUrl,
       },
       logsByStage: filterLogsByStage(logLines),
+      ...parseFailureFromLog(logLines),
     };
   }
 
@@ -114,6 +115,7 @@ export async function deriveRunStatus(
     exitCode,
     result: null,
     logsByStage,
+    ...parseFailureFromLog(logLines),
   };
 }
 
@@ -374,6 +376,24 @@ function filterLogsByStage(lines: string[]): Record<Stage, string[]> {
   }
 
   return byStage;
+}
+
+const CYCLE_FAILED_PATTERN = /CYCLE_FAILED:\s*([\w-]+)\s*\|\s*(.+)$/;
+
+/**
+ * Scans backwards for the CYCLE_FAILED sentinel line src/orchestrator/graph.ts
+ * writes on an unrecoverable failure — the last match wins, since an earlier
+ * decoy (e.g. an error message that happens to quote a prior sentinel) should
+ * never shadow the real, final one.
+ */
+export function parseFailureFromLog(lines: string[]): { failureCategory: string | null; failureReason: string | null } {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const match = lines[i].match(CYCLE_FAILED_PATTERN);
+    if (match) {
+      return { failureCategory: match[1], failureReason: match[2].trim() };
+    }
+  }
+  return { failureCategory: null, failureReason: null };
 }
 
 /**
