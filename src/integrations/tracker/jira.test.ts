@@ -63,4 +63,39 @@ describe("JiraAdapter.transitionTicket", () => {
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('No transition named "Nonexistent Status"'));
   });
+
+  it("throws JiraAuthError (not a generic error) on a 401 response", async () => {
+    const { JiraAdapter } = await import("./jira.js");
+    const { JiraAuthError } = await import("./errors.js");
+    const adapter = new JiraAdapter();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      text: async () => "Unauthorized",
+    } as Response);
+
+    await expect(adapter.transitionTicket("PROJ-1", "In Progress")).rejects.toThrow(JiraAuthError);
+  });
+
+  it("throws JiraApiError (not JiraAuthError) on a 429 rate-limit response", async () => {
+    const { JiraAdapter } = await import("./jira.js");
+    const { JiraApiError, JiraAuthError } = await import("./errors.js");
+    const adapter = new JiraAdapter();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 429,
+      text: async () => "Too Many Requests",
+    } as Response);
+
+    let caught: unknown;
+    try {
+      await adapter.transitionTicket("PROJ-1", "In Progress");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(JiraApiError);
+    expect(caught).not.toBeInstanceOf(JiraAuthError);
+  });
 });

@@ -2,6 +2,7 @@ import "dotenv/config";
 import { eq } from "drizzle-orm";
 import type { TrackerProvider, TrackerIssue } from "./types.js";
 import { markdownToAdf } from "./markdown-to-adf.js";
+import { JiraAuthError, JiraApiError } from "./errors.js";
 import { adfToMarkdown } from "./adf-to-markdown.js";
 import { LABEL_PREFIX, JIRA_PROJECT_KEY, JIRA_BASE_URL } from "../../lib/config.js";
 import { db } from "../../db/client.js";
@@ -48,7 +49,10 @@ export class JiraAdapter implements TrackerProvider {
       },
     });
     if (!res.ok) {
-      throw new Error(`Jira API ${init.method ?? "GET"} ${path} failed: ${res.status} ${await res.text()}`);
+      if (res.status === 401 || res.status === 403) {
+        throw new JiraAuthError(res.status, path);
+      }
+      throw new JiraApiError(res.status, init.method ?? "GET", path, await res.text());
     }
     if (res.status === 204) return null;
     return res.json();
