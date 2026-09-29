@@ -220,4 +220,47 @@ describe("GitHubAdapter — typed error classification", () => {
     expect(caught).toBeInstanceOf(GitHubApiError);
     expect(caught).not.toBeInstanceOf(GitHubAuthError);
   });
+
+  it("throws GitHubApiError (not GitHubAuthError) on a 403 that is actually a rate limit", async () => {
+    process.env.GITHUB_TOKEN = "tok";
+    process.env.GITHUB_OWNER = "acme";
+    process.env.GITHUB_REPO = "widgets";
+    // @ts-expect-error cache-busting query string forces a fresh module instance; not a real resolvable path for tsc
+    const { GitHubAdapter } = await import("./github.js?ratelimit1");
+    const { GitHubApiError, GitHubAuthError } = await import("./errors.js");
+    const adapter = new GitHubAdapter();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      text: async () => "API rate limit exceeded for installation ID 123.",
+    } as Response);
+
+    let caught: unknown;
+    try {
+      await adapter.createTag("v1", "sha1");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(GitHubApiError);
+    expect(caught).not.toBeInstanceOf(GitHubAuthError);
+  });
+
+  it("throws GitHubAuthError on a 403 that is not a rate limit (invalid/insufficient token)", async () => {
+    process.env.GITHUB_TOKEN = "tok";
+    process.env.GITHUB_OWNER = "acme";
+    process.env.GITHUB_REPO = "widgets";
+    // @ts-expect-error cache-busting query string forces a fresh module instance; not a real resolvable path for tsc
+    const { GitHubAdapter } = await import("./github.js?authforbidden1");
+    const { GitHubAuthError } = await import("./errors.js");
+    const adapter = new GitHubAdapter();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      text: async () => "Resource not accessible by integration",
+    } as Response);
+
+    await expect(adapter.createTag("v1", "sha1")).rejects.toThrow(GitHubAuthError);
+  });
 });

@@ -62,6 +62,7 @@ export async function deriveRunStatus(
     // touch is their own name, so showing "Release" as the completed badge
     // would be misleading (nothing was released).
     const completedStage: Stage = mode === "full" ? "release" : mode;
+    const failure = parseFailureFromLog(logLines);
 
     return {
       cycleId,
@@ -74,7 +75,7 @@ export async function deriveRunStatus(
       counts: await deriveCounts(cycle.startedAt, epicKey, database),
       recentLog: logLines.slice(-20),
       processAlive,
-      failed: exitCode !== null && exitCode !== 0,
+      failed: isCycleFailed(exitCode, failure.failureCategory),
       exitCode,
       result: {
         fixed: fixed.map((t) => ({ id: t.id, jiraKey: t.jiraKey, category: t.category })),
@@ -84,7 +85,7 @@ export async function deriveRunStatus(
         prUrl,
       },
       logsByStage: filterLogsByStage(logLines),
-      ...parseFailureFromLog(logLines),
+      ...failure,
     };
   }
 
@@ -376,6 +377,17 @@ function filterLogsByStage(lines: string[]): Record<Stage, string[]> {
   }
 
   return byStage;
+}
+
+/**
+ * A closed cycle (endedAt set) is only "failed" if the orchestrator wrote a
+ * CYCLE_FAILED sentinel, or the process's own exit code says so. The status
+ * route cannot capture the child process's real exit code (it hardcodes 0
+ * whenever the process is no longer alive) — the sentinel-derived category is
+ * what actually distinguishes a crashed-but-closed cycle from a clean finish.
+ */
+export function isCycleFailed(exitCode: number | null, failureCategory: string | null): boolean {
+  return (exitCode !== null && exitCode !== 0) || failureCategory !== null;
 }
 
 const CYCLE_FAILED_PATTERN = /CYCLE_FAILED:\s*([\w-]+)\s*\|\s*(.+)$/;

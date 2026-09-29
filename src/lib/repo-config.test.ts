@@ -47,37 +47,54 @@ describe("assertRepoReadyForCycle", () => {
   it("treats blank/whitespace-only porcelain output as a clean tree", async () => {
     runMock
       .mockResolvedValueOnce({ stdout: "  \n\n", stderr: "" }) // status --porcelain
+      .mockResolvedValueOnce({ stdout: "qa", stderr: "" }) // rev-parse --verify (local branch exists)
       .mockResolvedValueOnce({ stdout: "", stderr: "" }) // fetch
       .mockResolvedValueOnce({ stdout: "0\t0\n", stderr: "" }); // rev-list ahead/behind
     const { assertRepoReadyForCycle } = await import("./repo-config.js");
     await expect(assertRepoReadyForCycle("C:/repo")).resolves.toBeUndefined();
   });
 
-  it("throws GitNotSyncedError when the branch is behind origin", async () => {
+  it("throws GitNotSyncedError when the local branch exists and is behind origin", async () => {
     runMock
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "qa", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "0\t2\n", stderr: "" }); // 0 ahead, 2 behind
     const { assertRepoReadyForCycle, GitNotSyncedError } = await import("./repo-config.js");
     await expect(assertRepoReadyForCycle("C:/repo")).rejects.toThrow(GitNotSyncedError);
   });
 
-  it("throws GitNotSyncedError when the branch has unpushed commits ahead of origin", async () => {
+  it("throws GitNotSyncedError when the local branch exists and has unpushed commits ahead of origin", async () => {
     runMock
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "qa", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "3\t0\n", stderr: "" }); // 3 ahead, 0 behind
     const { assertRepoReadyForCycle, GitNotSyncedError } = await import("./repo-config.js");
     await expect(assertRepoReadyForCycle("C:/repo")).rejects.toThrow(GitNotSyncedError);
   });
 
-  it("fetches origin before comparing ahead/behind counts", async () => {
+  it("fetches origin before comparing ahead/behind counts, when a local branch exists", async () => {
     runMock
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
+      .mockResolvedValueOnce({ stdout: "qa", stderr: "" })
       .mockResolvedValueOnce({ stdout: "", stderr: "" })
       .mockResolvedValueOnce({ stdout: "0\t0\n", stderr: "" });
     const { assertRepoReadyForCycle } = await import("./repo-config.js");
     await assertRepoReadyForCycle("C:/repo");
     expect(runMock).toHaveBeenCalledWith("git", ["fetch", "origin", "qa"], "C:/repo");
+  });
+
+  it("skips the ahead/behind check entirely when there is no local branch ref to compare", async () => {
+    // This pipeline creates worktrees straight from origin/<branch> and never
+    // checks it out in TARGET_REPO_PATH itself — a missing local ref is the
+    // common case, not an error condition.
+    runMock
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }) // status --porcelain
+      .mockRejectedValueOnce(new Error("fatal: Needed a single revision")); // rev-parse --verify fails
+    const { assertRepoReadyForCycle } = await import("./repo-config.js");
+    await expect(assertRepoReadyForCycle("C:/repo")).resolves.toBeUndefined();
+    expect(runMock).toHaveBeenCalledTimes(2);
+    expect(runMock).not.toHaveBeenCalledWith("git", ["fetch", "origin", "qa"], "C:/repo");
   });
 });

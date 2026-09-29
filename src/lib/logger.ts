@@ -33,10 +33,24 @@ function currentLogFile(): string {
   return STARTUP_LOG_FILE;
 }
 
+/**
+ * File I/O failures (disk full, permission denied, antivirus lock on
+ * Windows, ...) must never break the pipeline just because it tried to log
+ * something — every call site relies on logger.* being at least as safe as
+ * the console.* calls it replaced.
+ */
+function writeFileSafely(filePath: string, contents: string): void {
+  try {
+    const dir = dirname(filePath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    appendFileSync(filePath, contents, "utf-8");
+  } catch {
+    // Best-effort — the console echo below is the fallback.
+  }
+}
+
 function writeLine(level: LogLevel, moduleName: string, message: string, error?: unknown): void {
   const filePath = currentLogFile();
-  const dir = dirname(filePath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
   const timestamp = new Date().toISOString();
   const safeMessage = redactSecrets(message);
@@ -46,7 +60,7 @@ function writeLine(level: LogLevel, moduleName: string, message: string, error?:
   } else if (error !== undefined) {
     fileLines.push(`    ${redactSecrets(String(error))}`);
   }
-  appendFileSync(filePath, fileLines.join("\n") + "\n", "utf-8");
+  writeFileSafely(filePath, fileLines.join("\n") + "\n");
 
   const consoleMessage = `[${moduleName}] ${safeMessage}`;
   const consoleErrArg = error instanceof Error ? redactSecrets(error.message) : error !== undefined ? redactSecrets(String(error)) : undefined;

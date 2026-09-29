@@ -1,20 +1,58 @@
 #!/usr/bin/env node
 import "dotenv/config";
 import { Command } from "commander";
-import { runScannerAgent, type AuthRole } from "../scan/scanner-agent.js";
-import { runTriageAgent } from "../triage/triage-agent.js";
-import { triageFromReports } from "../triage/triage-from-reports.js";
-import { runDeveloperAgent, fixTicketOnBranch, type BatchFixResult } from "../development/developer-agent.js";
-import { runReviewerAgent, reviewBranch, type ReviewerVerdict, type BranchReviewVerdict } from "../review/reviewer-agent.js";
-import { runDeployAgent, deployBranch, type DeployResult, type BranchDeployResult } from "../deploy/deploy-agent.js";
-import { runReleaseAgent } from "../release/release-agent.js";
-import { getTrackerProvider } from "../integrations/tracker/factory.js";
-import { getVcsProvider } from "../integrations/vcs/factory.js";
-import { runOrchestratorCycle, type CycleMode } from "../orchestrator/graph.js";
-import { initObservability, withSpan } from "../integrations/observability.js";
+import type { AuthRole } from "../scan/scanner-agent.js";
+import type { BatchFixResult } from "../development/developer-agent.js";
+import type { ReviewerVerdict, BranchReviewVerdict } from "../review/reviewer-agent.js";
+import type { DeployResult, BranchDeployResult } from "../deploy/deploy-agent.js";
+import type { CycleMode } from "../orchestrator/graph.js";
 import { logger } from "../lib/logger.js";
-import { db } from "../db/client.js";
-import { iterationCycles } from "../db/schema.js";
+import { validateConfig } from "../lib/preflight.js";
+
+// PROJECT_KEY (src/lib/config.js) and DATABASE_URL (src/db/client.js) both
+// throw synchronously at import time — and every module below transitively
+// imports one or both. Checking them here, before any of those imports run,
+// converts that crash from an unhandled top-level exception (no log, no
+// closed cycle) into a caught, logged, cleanly-exited failure — and for a
+// web-triggered `orchestrate --cycle-id <id>` run, closes that cycle's row
+// so the dashboard doesn't show it as perpetually "in progress".
+try {
+  validateConfig({ db: true });
+} catch (err) {
+  logger.error("cli", "Startup configuration check failed", err);
+  const cycleIdIndex = process.argv.indexOf("--cycle-id");
+  const cycleId = cycleIdIndex !== -1 ? process.argv[cycleIdIndex + 1] : undefined;
+  if (cycleId) {
+    try {
+      const [{ db }, { iterationCycles }, { eq, and, isNull }] = await Promise.all([
+        import("../db/client.js"),
+        import("../db/schema.js"),
+        import("drizzle-orm"),
+      ]);
+      await db
+        .update(iterationCycles)
+        .set({ endedAt: new Date() })
+        .where(and(eq(iterationCycles.id, cycleId), isNull(iterationCycles.endedAt)));
+    } catch (closeErr) {
+      logger.warn("cli", "Could not close the cycle row after a startup configuration failure", closeErr);
+    }
+  }
+  process.exit(1);
+}
+
+const { runScannerAgent } = await import("../scan/scanner-agent.js");
+const { runTriageAgent } = await import("../triage/triage-agent.js");
+const { triageFromReports } = await import("../triage/triage-from-reports.js");
+const { runDeveloperAgent, fixTicketOnBranch } = await import("../development/developer-agent.js");
+const { runReviewerAgent, reviewBranch } = await import("../review/reviewer-agent.js");
+const { runDeployAgent, deployBranch } = await import("../deploy/deploy-agent.js");
+const { runReleaseAgent } = await import("../release/release-agent.js");
+const { getTrackerProvider } = await import("../integrations/tracker/factory.js");
+const { getVcsProvider } = await import("../integrations/vcs/factory.js");
+const { runOrchestratorCycle } = await import("../orchestrator/graph.js");
+const { initObservability, withSpan } = await import("../integrations/observability.js");
+const { db } = await import("../db/client.js");
+const { iterationCycles } = await import("../db/schema.js");
 
 const tracker = getTrackerProvider();
 const vcs = getVcsProvider();

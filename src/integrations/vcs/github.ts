@@ -55,10 +55,14 @@ export class GitHubAdapter implements VcsProvider {
       },
     });
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
+      const body = await res.text();
+      // GitHub returns 403 for both an invalid/insufficient token and a
+      // primary/secondary rate limit — only the former should tell the user
+      // to rotate GITHUB_TOKEN.
+      if (res.status === 401 || (res.status === 403 && !/rate limit/i.test(body))) {
         throw new GitHubAuthError(res.status, path);
       }
-      throw new GitHubApiError(res.status, init.method ?? "GET", path, await res.text());
+      throw new GitHubApiError(res.status, init.method ?? "GET", path, body);
     }
     if (res.status === 204) return null;
     return res.json();

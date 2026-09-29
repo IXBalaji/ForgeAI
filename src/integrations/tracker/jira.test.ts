@@ -98,4 +98,39 @@ describe("JiraAdapter.transitionTicket", () => {
     expect(caught).toBeInstanceOf(JiraApiError);
     expect(caught).not.toBeInstanceOf(JiraAuthError);
   });
+
+  it("throws JiraApiError (not JiraAuthError) on a 403 that is actually a rate limit", async () => {
+    const { JiraAdapter } = await import("./jira.js");
+    const { JiraApiError, JiraAuthError } = await import("./errors.js");
+    const adapter = new JiraAdapter();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      text: async () => "API rate limit exceeded for this account.",
+    } as Response);
+
+    let caught: unknown;
+    try {
+      await adapter.transitionTicket("PROJ-1", "In Progress");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(JiraApiError);
+    expect(caught).not.toBeInstanceOf(JiraAuthError);
+  });
+
+  it("throws JiraAuthError on a 403 that is not a rate limit (invalid/insufficient token)", async () => {
+    const { JiraAdapter } = await import("./jira.js");
+    const { JiraAuthError } = await import("./errors.js");
+    const adapter = new JiraAdapter();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      text: async () => "You do not have permission to perform this action.",
+    } as Response);
+
+    await expect(adapter.transitionTicket("PROJ-1", "In Progress")).rejects.toThrow(JiraAuthError);
+  });
 });

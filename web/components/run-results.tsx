@@ -14,6 +14,7 @@ import {
   resultsApiPath,
 } from "@/lib/results-constants";
 import { EmptyState, ExternalLink, ResultsSection, SeverityBadge, StatusBadge, SummaryTile, Tag } from "./results-parts";
+import { ErrorPanel } from "./error-panel";
 
 interface RunResultsProps {
   status: RunStatus;
@@ -68,6 +69,10 @@ export function RunResults({ status, onStartAnother }: RunResultsProps) {
           {isFull && prUrl ? <ExternalLink href={prUrl}>{COPY.viewPr}</ExternalLink> : null}
         </div>
       </header>
+
+      {status.failed && status.failureReason ? (
+        <ErrorPanel error={`${status.failureCategory ? `[${status.failureCategory}] ` : ""}${status.failureReason}`} />
+      ) : null}
 
       {loadFailed ? (
         <EmptyState>{COPY.loadError}</EmptyState>

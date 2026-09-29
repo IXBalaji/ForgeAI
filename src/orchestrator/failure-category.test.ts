@@ -74,3 +74,23 @@ describe("categorizeCycleFailure", () => {
     expect(result.reason).toBe("plain string throw");
   });
 });
+
+describe("formatCycleFailedSentinel", () => {
+  it("collapses a multi-line reason onto a single sentinel line", async () => {
+    const { formatCycleFailedSentinel } = await import("./failure-category.js");
+    const reason = "Configuration is incomplete:\n  - PROJECT_KEY is not set.\n  - DATABASE_URL is not set.";
+    const sentinel = formatCycleFailedSentinel("config", reason);
+
+    expect(sentinel.split("\n")).toHaveLength(1);
+    expect(sentinel).toBe(
+      "CYCLE_FAILED: config | Configuration is incomplete: - PROJECT_KEY is not set. - DATABASE_URL is not set.",
+    );
+  });
+
+  it("leaves a single-line reason unchanged apart from the sentinel prefix", async () => {
+    const { formatCycleFailedSentinel } = await import("./failure-category.js");
+    expect(formatCycleFailedSentinel("internal", "connection reset")).toBe(
+      "CYCLE_FAILED: internal | connection reset",
+    );
+  });
+});

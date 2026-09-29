@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseFailureFromLog } from "./run-status";
+import { parseFailureFromLog, isCycleFailed } from "./run-status";
 
 describe("parseFailureFromLog", () => {
   it("extracts category and reason from the CYCLE_FAILED sentinel line", () => {
@@ -29,5 +29,24 @@ describe("parseFailureFromLog", () => {
       failureCategory: "config",
       failureReason: "PROJECT_KEY is not set.",
     });
+  });
+});
+
+describe("isCycleFailed", () => {
+  it("is true when a failure category was parsed from the log, even with exitCode 0", () => {
+    // The web app's status route cannot capture the orchestrator child process's
+    // real exit code (see status/route.ts's comment) — it hardcodes exitCode to 0
+    // whenever the process is no longer alive. Without the sentinel-derived
+    // category, a crashed-but-closed cycle would render as "Complete".
+    expect(isCycleFailed(0, "config")).toBe(true);
+  });
+
+  it("is true when the exit code is a nonzero number, even with no failure category", () => {
+    expect(isCycleFailed(1, null)).toBe(true);
+  });
+
+  it("is false when there is no failure category and the exit code is 0 or null", () => {
+    expect(isCycleFailed(0, null)).toBe(false);
+    expect(isCycleFailed(null, null)).toBe(false);
   });
 });

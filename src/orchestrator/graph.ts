@@ -49,7 +49,7 @@ import { withRetry } from "../lib/retry.js";
 import { assertTargetRepoConfigured, ensureFreshQaBase, assertRepoReadyForCycle } from "../lib/repo-config.js";
 import { validateConfig } from "../lib/preflight.js";
 import { runWithCycleLogger, logger } from "../lib/logger.js";
-import { categorizeCycleFailure } from "./failure-category.js";
+import { categorizeCycleFailure, formatCycleFailedSentinel } from "./failure-category.js";
 import { LABEL_PREFIX, LABEL_PREFIX_SLUG } from "../lib/config.js";
 import { logAudit } from "../lib/audit-log.js";
 import { notifyUnrecoverableError } from "../lib/notify.js";
@@ -900,7 +900,7 @@ async function _runOrchestratorCycle(existingCycleId?: string, mode: CycleMode =
     } catch (err) {
       const { category, reason } = categorizeCycleFailure(err);
       logger.error("orchestrate", `Cycle ${cycle.id} failed (${category}): ${reason}`, err);
-      logger.error("orchestrate", `CYCLE_FAILED: ${category} | ${reason}`);
+      logger.error("orchestrate", formatCycleFailedSentinel(category, reason));
       throw err;
     } finally {
       await db

@@ -55,6 +55,17 @@ export async function assertRepoReadyForCycle(repoPath = assertTargetRepoConfigu
   }
 
   const branch = process.env.GITHUB_QA_BRANCH ?? "qa";
+
+  // This pipeline creates worktrees straight from origin/<branch> and never
+  // checks the branch out in TARGET_REPO_PATH itself, so there is usually no
+  // local ref to compare — that's the common case, not something to report.
+  // Only run the ahead/behind check when a local ref genuinely exists (e.g. a
+  // human checked it out manually).
+  const hasLocalBranch = await run("git", ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`], repoPath)
+    .then(() => true)
+    .catch(() => false);
+  if (!hasLocalBranch) return;
+
   await run("git", ["fetch", "origin", branch], repoPath);
   const { stdout: countsOut } = await run(
     "git",

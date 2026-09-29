@@ -20,3 +20,15 @@ export function categorizeCycleFailure(err: unknown): CycleFailure {
   if (err instanceof ReleaseError) return { category: "release", reason };
   return { category: "internal", reason };
 }
+
+/**
+ * Formats the CYCLE_FAILED sentinel as a single line — ConfigError and
+ * GitNotCleanError messages (and many exec errors) span multiple lines, and
+ * the web dashboard's sentinel parser only reads whichever single log line
+ * matches the pattern, so a multi-line reason would otherwise be truncated
+ * to just its first line.
+ */
+export function formatCycleFailedSentinel(category: string, reason: string): string {
+  const flatReason = reason.replace(/\s*\n\s*/g, " ").trim();
+  return `CYCLE_FAILED: ${category} | ${flatReason}`;
+}

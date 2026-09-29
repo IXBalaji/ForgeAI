@@ -78,4 +78,27 @@ describe("logger", () => {
     const consoleArgs = errorSpy.mock.calls[0];
     expect(consoleArgs.join(" ")).not.toContain("ghp_abcdef1234567890");
   });
+
+  it("does not throw when the file write fails, and still echoes to console", async () => {
+    appendFileSyncMock.mockImplementation(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+    const { logger } = await import("./logger.js");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    expect(() => logger.info("triage", "classified 4 issues")).not.toThrow();
+    expect(logSpy).toHaveBeenCalledWith("[triage] classified 4 issues");
+  });
+
+  it("does not throw when mkdirSync fails", async () => {
+    existsSyncMock.mockReturnValue(false);
+    mkdirSyncMock.mockImplementation(() => {
+      throw new Error("EACCES: permission denied");
+    });
+    const { logger } = await import("./logger.js");
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    expect(() => logger.info("triage", "classified 4 issues")).not.toThrow();
+    expect(logSpy).toHaveBeenCalledWith("[triage] classified 4 issues");
+  });
 });

@@ -50,10 +50,14 @@ export class JiraAdapter implements TrackerProvider {
       },
     });
     if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
+      const body = await res.text();
+      // 403 is ambiguous on Jira's API: it covers both an invalid/insufficient
+      // token and a plain rate limit — only the former should tell the user to
+      // rotate their token.
+      if (res.status === 401 || (res.status === 403 && !/rate limit/i.test(body))) {
         throw new JiraAuthError(res.status, path);
       }
-      throw new JiraApiError(res.status, init.method ?? "GET", path, await res.text());
+      throw new JiraApiError(res.status, init.method ?? "GET", path, body);
     }
     if (res.status === 204) return null;
     return res.json();
