@@ -1,5 +1,6 @@
 import "dotenv/config";
 import type { VcsProvider, PullRequestRef, PullRequestStatus, PrReviewComment } from "./types.js";
+import { GitHubAuthError, GitHubApiError } from "./errors.js";
 
 const MERGEABLE_POLL_ATTEMPTS = 4;
 const MERGEABLE_POLL_DELAY_MS = 1500;
@@ -53,7 +54,10 @@ export class GitHubAdapter implements VcsProvider {
       },
     });
     if (!res.ok) {
-      throw new Error(`GitHub API ${init.method ?? "GET"} ${path} failed: ${res.status} ${await res.text()}`);
+      if (res.status === 401 || res.status === 403) {
+        throw new GitHubAuthError(res.status, path);
+      }
+      throw new GitHubApiError(res.status, init.method ?? "GET", path, await res.text());
     }
     if (res.status === 204) return null;
     return res.json();

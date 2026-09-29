@@ -172,3 +172,52 @@ describe("GitHubAdapter", () => {
     });
   });
 });
+
+describe("GitHubAdapter — typed error classification", () => {
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  it("throws GitHubAuthError (not GitHubApiError) on a 401 response", async () => {
+    process.env.GITHUB_TOKEN = "tok";
+    process.env.GITHUB_OWNER = "acme";
+    process.env.GITHUB_REPO = "widgets";
+    // @ts-expect-error cache-busting query string forces a fresh module instance; not a real resolvable path for tsc
+    const { GitHubAdapter } = await import("./github.js?autherr1");
+    const { GitHubAuthError } = await import("./errors.js");
+    const adapter = new GitHubAdapter();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      text: async () => "Bad credentials",
+    } as Response);
+
+    await expect(adapter.createTag("v1", "sha1")).rejects.toThrow(GitHubAuthError);
+  });
+
+  it("throws GitHubApiError (not GitHubAuthError) on a 422 response", async () => {
+    process.env.GITHUB_TOKEN = "tok";
+    process.env.GITHUB_OWNER = "acme";
+    process.env.GITHUB_REPO = "widgets";
+    // @ts-expect-error cache-busting query string forces a fresh module instance; not a real resolvable path for tsc
+    const { GitHubAdapter } = await import("./github.js?apierr1");
+    const { GitHubApiError, GitHubAuthError } = await import("./errors.js");
+    const adapter = new GitHubAdapter();
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: false,
+      status: 422,
+      text: async () => "Validation Failed",
+    } as Response);
+
+    let caught: unknown;
+    try {
+      await adapter.createTag("v1", "sha1");
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(GitHubApiError);
+    expect(caught).not.toBeInstanceOf(GitHubAuthError);
+  });
+});
