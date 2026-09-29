@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync, mkdirSync, appendFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { redactSecrets } from "../observability/sanitize.js";
 
 export type LogLevel = "info" | "warn" | "error";
 
@@ -38,16 +39,17 @@ function writeLine(level: LogLevel, moduleName: string, message: string, error?:
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 
   const timestamp = new Date().toISOString();
-  const fileLines = [`[${timestamp}] [${level.toUpperCase()}] [${moduleName}] ${message}`];
+  const safeMessage = redactSecrets(message);
+  const fileLines = [`[${timestamp}] [${level.toUpperCase()}] [${moduleName}] ${safeMessage}`];
   if (error instanceof Error) {
-    fileLines.push((error.stack ?? error.message).split("\n").map((l) => `    ${l}`).join("\n"));
+    fileLines.push(redactSecrets(error.stack ?? error.message).split("\n").map((l) => `    ${l}`).join("\n"));
   } else if (error !== undefined) {
-    fileLines.push(`    ${String(error)}`);
+    fileLines.push(`    ${redactSecrets(String(error))}`);
   }
   appendFileSync(filePath, fileLines.join("\n") + "\n", "utf-8");
 
-  const consoleMessage = `[${moduleName}] ${message}`;
-  const consoleErrArg = error instanceof Error ? error.message : error;
+  const consoleMessage = `[${moduleName}] ${safeMessage}`;
+  const consoleErrArg = error instanceof Error ? redactSecrets(error.message) : error !== undefined ? redactSecrets(String(error)) : undefined;
   const consoleArgs = error !== undefined ? [consoleMessage, consoleErrArg] : [consoleMessage];
   if (level === "error") console.error(...consoleArgs);
   else if (level === "warn") console.warn(...consoleArgs);

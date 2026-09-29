@@ -59,4 +59,23 @@ describe("logger", () => {
     logger.info("triage", "classified 4 issues");
     expect(logSpy).toHaveBeenCalledWith("[triage] classified 4 issues");
   });
+
+  it("redacts secrets from the message and error content before writing to file or console", async () => {
+    const { logger, runWithCycleLogger } = await import("./logger.js");
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await runWithCycleLogger("cycle-secret", async () => {
+      logger.error(
+        "github",
+        "GitHub API POST /repos/acme/widgets/pulls failed: 401 Bearer ghp_abcdef1234567890",
+        new Error("push failed: https://x-access-token:ghp_abcdef1234567890@github.com/acme/widgets.git"),
+      );
+    });
+
+    const [, content] = appendFileSyncMock.mock.calls[0];
+    expect(content).not.toContain("ghp_abcdef1234567890");
+    expect(content).toContain("[REDACTED]");
+
+    const consoleArgs = errorSpy.mock.calls[0];
+    expect(consoleArgs.join(" ")).not.toContain("ghp_abcdef1234567890");
+  });
 });
