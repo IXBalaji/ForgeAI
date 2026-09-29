@@ -24,3 +24,46 @@ export async function ensureFreshQaBase(repoPath = assertTargetRepoConfigured())
   await run("git", ["fetch", "--all", "--prune"], repoPath);
   await run("git", ["fetch", "origin", qaBranch], repoPath);
 }
+
+export class GitNotCleanError extends Error {
+  constructor(dirtyFiles: string[]) {
+    super(`Working tree is not clean — commit, stash, or discard changes before running:\n${dirtyFiles.map((f) => `  ${f}`).join("\n")}`);
+    this.name = "GitNotCleanError";
+  }
+}
+
+export class GitNotSyncedError extends Error {
+  constructor(branch: string, direction: "behind" | "ahead") {
+    super(
+      direction === "behind"
+        ? `Branch "${branch}" is behind origin/${branch} — pull the latest changes before running.`
+        : `Branch "${branch}" has unpushed commits ahead of origin/${branch} — push before running.`,
+    );
+    this.name = "GitNotSyncedError";
+  }
+}
+
+/**
+ * Confirms the target repo is safe to start a new cycle on: no uncommitted
+ * changes, and the base branch is neither behind nor ahead of origin.
+ */
+export async function assertRepoReadyForCycle(repoPath = assertTargetRepoConfigured()): Promise<void> {
+  const { stdout: statusOut } = await run("git", ["status", "--porcelain"], repoPath);
+  const dirtyFiles = statusOut.split("\n").map((l) => l.trim()).filter(Boolean);
+  if (dirtyFiles.length > 0) {
+    throw new GitNotCleanError(dirtyFiles);
+  }
+
+  const branch = process.env.GITHUB_QA_BRANCH ?? "qa";
+  await run("git", ["fetch", "origin", branch], repoPath);
+  const { stdout: countsOut } = await run(
+    "git",
+    ["rev-list", "--left-right", "--count", `${branch}...origin/${branch}`],
+    repoPath,
+  );
+  const [aheadStr, behindStr] = countsOut.trim().split(/\s+/);
+  const ahead = parseInt(aheadStr ?? "0", 10);
+  const behind = parseInt(behindStr ?? "0", 10);
+  if (behind > 0) throw new GitNotSyncedError(branch, "behind");
+  if (ahead > 0) throw new GitNotSyncedError(branch, "ahead");
+}
