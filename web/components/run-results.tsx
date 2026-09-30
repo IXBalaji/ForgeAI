@@ -100,7 +100,9 @@ export function RunResults({ status, onStartAnother }: RunResultsProps) {
 }
 
 function SummaryStrip({ scan, tickets, isFull }: { scan: ScanResults; tickets: TicketRow[] | null; isFull: boolean }) {
-  const count = (statuses: string[]) => tickets?.filter((t) => statuses.includes(t.status)).length ?? 0;
+  const matching = (statuses: string[]) => tickets?.filter((t) => statuses.includes(t.status)) ?? [];
+  const count = (statuses: string[]) => matching(statuses).length;
+  const issues = (statuses: string[]) => matching(statuses).reduce((n, t) => n + t.issueCount, 0);
   const newCount = tickets?.filter((t) => t.isNew).length ?? 0;
 
   return (
@@ -113,14 +115,23 @@ function SummaryStrip({ scan, tickets, isFull }: { scan: ScanResults; tickets: T
           <SummaryTile
             value={tickets.length}
             label={COPY.statTickets}
-            detail={COPY.ticketsDetail(newCount, tickets.length - newCount)}
+            detail={`${COPY.ticketsDetail(newCount, tickets.length - newCount)} · ${COPY.issueCountDetail(issues(Object.values(TICKET_STATUS)))}`}
           />
         ) : null}
         {isFull && tickets ? (
           <>
-            <SummaryTile value={count([TICKET_STATUS.done])} label={COPY.statFixed} tone="success" />
-            <SummaryTile value={count([TICKET_STATUS.open, TICKET_STATUS.inProgress, TICKET_STATUS.inReview])} label={COPY.statOutstanding} />
-            <SummaryTile value={count([TICKET_STATUS.parked, TICKET_STATUS.flagged])} label={COPY.statNeedsAttention} tone="warning" />
+            <SummaryTile value={count([TICKET_STATUS.done])} label={COPY.statFixed} detail={COPY.issueCountDetail(issues([TICKET_STATUS.done]))} tone="success" />
+            <SummaryTile
+              value={count([TICKET_STATUS.open, TICKET_STATUS.inProgress, TICKET_STATUS.inReview])}
+              label={COPY.statOutstanding}
+              detail={COPY.issueCountDetail(issues([TICKET_STATUS.open, TICKET_STATUS.inProgress, TICKET_STATUS.inReview]))}
+            />
+            <SummaryTile
+              value={count([TICKET_STATUS.parked, TICKET_STATUS.flagged])}
+              label={COPY.statNeedsAttention}
+              detail={COPY.issueCountDetail(issues([TICKET_STATUS.parked, TICKET_STATUS.flagged]))}
+              tone="warning"
+            />
           </>
         ) : null}
       </div>

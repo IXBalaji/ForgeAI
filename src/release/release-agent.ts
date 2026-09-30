@@ -115,12 +115,18 @@ export async function runReleaseAgent(cycleId: string): Promise<ReleaseReport> {
     });
   }
 
+  const unresolvedTickets = [...parkedTickets, ...flaggedTickets, ...openTickets];
+  const countIssues = (rows: Array<{ issueIds: unknown }>) =>
+    rows.reduce((n, t) => n + ((t.issueIds as string[] | null)?.length ?? 0), 0);
+
   const emailData: PostProcessEmailData = {
     projectLabel: LABEL_PREFIX,
     cycleId,
     generatedAt: new Date(),
     resolvedCount: doneTickets.length,
-    unresolvedCount: parkedTickets.length + flaggedTickets.length + openTickets.length,
+    unresolvedCount: unresolvedTickets.length,
+    resolvedIssueCount: countIssues(doneTickets),
+    unresolvedIssueCount: countIssues(unresolvedTickets),
     tickets: [...doneTickets, ...parkedTickets, ...flaggedTickets, ...openTickets].map((t) => ({
       jiraKey: t.jiraKey,
       id: t.id,
