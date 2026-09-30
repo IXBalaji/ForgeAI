@@ -9,7 +9,7 @@ export async function GET() {
     .select()
     .from(iterationCycles)
     .orderBy(desc(iterationCycles.startedAt))
-    .limit(30);
+    .limit(200);
 
   return NextResponse.json({
     cycles: cycles.map((c) => ({

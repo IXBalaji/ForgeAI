@@ -234,6 +234,12 @@ body {
   border-radius: var(--radius-lg);
 }
 
+.button-small {
+  font-size: 0.813rem;
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-sm);
+}
+
 .actions {
   display: flex;
   justify-content: center;
@@ -1253,6 +1259,19 @@ body {
   background: var(--color-surface-hover);
 }
 
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  margin-top: var(--space-6);
+}
+
+.pagination__info {
+  font-size: 0.813rem;
+  color: var(--color-text-muted);
+}
+
 .result-actions {
   display: flex;
   justify-content: center;
@@ -1372,6 +1391,17 @@ body {
   font-weight: 800;
   letter-spacing: -0.02em;
   margin-bottom: var(--space-2);
+}
+
+/* === Page Header (Logs, etc.) === */
+.page-header {
+  margin-bottom: var(--space-8);
+}
+
+.page-header h1 {
+  font-size: 2rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
 }
 
 .settings-header__desc {

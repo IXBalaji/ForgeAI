@@ -22,7 +22,9 @@ export default function LogDetailPage({ params }: { params: Promise<{ cycleId: s
 
   return (
     <main className="container">
-      <h1>Cycle {cycleId}</h1>
+      <header className="page-header">
+        <h1>Cycle {cycleId}</h1>
+      </header>
       {error && <p>{error}</p>}
       {content !== null && <pre className="log-view">{content}</pre>}
     </main>
