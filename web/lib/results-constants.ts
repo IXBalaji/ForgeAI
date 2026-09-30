@@ -129,9 +129,10 @@ export const RESULTS_COPY = {
   statTickets: "Tickets",
   ticketsDetail: (created: number, updated: number) => `${created} new · ${updated} updated`,
   opensInNewTab: "(opens in new tab)",
-  statFixed: "Fixed",
-  statOutstanding: "Outstanding",
-  statNeedsAttention: "Parked / flagged",
+  issueCountDetail: (n: number) => `${n} issue${n === 1 ? "" : "s"}`,
+  statFixed: "Tickets fixed",
+  statOutstanding: "Tickets outstanding",
+  statNeedsAttention: "Tickets parked / flagged",
 
   issuesTitle: "Issues found",
   issuesTitleFull: "Issues remaining",

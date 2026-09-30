@@ -78,7 +78,7 @@ function renderSection(key: keyof typeof STATUS_META, tickets: TicketRow[]): str
   </table>`;
 }
 
-function renderStatCard(count: number, label: string, color: string): string {
+function renderStatCard(count: number, label: string, color: string, subLabel?: string): string {
   return `
     <td width="33%" style="padding:0 6px;">
       <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;">
@@ -86,6 +86,7 @@ function renderStatCard(count: number, label: string, color: string): string {
           <td align="center" style="padding:18px 8px;">
             <div style="font-size:28px;font-weight:800;color:${color};line-height:1;">${count}</div>
             <div style="font-size:12px;color:#64748b;margin-top:4px;font-weight:600;letter-spacing:0.02em;text-transform:uppercase;">${label}</div>
+            ${subLabel ? `<div style="font-size:11px;color:#94a3b8;margin-top:3px;">${subLabel}</div>` : ""}
           </td>
         </tr>
       </table>
@@ -164,9 +165,9 @@ export function renderPreProcessEmailText(data: PreProcessEmailData): string {
   const { cycleId, totalIssues, severityCounts, tickets: ticketRows, plannedBranch } = data;
   const severityLines = Object.entries(severityCounts).map(([sev, count]) => `  - ${sev}: ${count}`);
   return [
-    `Cycle ${cycleId} — initial analysis complete: ${totalIssues} issue(s) identified.`,
+    `Cycle ${cycleId} — initial analysis complete: ${ticketRows.length} ticket(s) created covering ${totalIssues} violation(s).`,
     ``,
-    `By severity:`,
+    `By severity (violations):`,
     ...severityLines,
     ``,
     `Jira tickets created (${ticketRows.length}):`,
@@ -213,14 +214,14 @@ export function renderPreProcessEmailHtml(data: PreProcessEmailData): string {
             <tr>
               <td style="background:linear-gradient(135deg,#4f46e5,#7c3aed);padding:28px 32px;">
                 <div style="color:#e0e7ff;font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">${safe(projectLabel)} · Pre-Process Report</div>
-                <div style="color:#ffffff;font-size:22px;font-weight:800;margin-top:6px;">Analysis Complete — ${totalIssues} Issue(s) Found</div>
+                <div style="color:#ffffff;font-size:22px;font-weight:800;margin-top:6px;">Analysis Complete — ${ticketRows.length} Ticket(s) for ${totalIssues} Violation(s)</div>
                 <div style="color:#c7d2fe;font-size:13px;margin-top:4px;">Cycle ${safe(cycleId)} &nbsp;•&nbsp; ${safe(dateStr)}</div>
               </td>
             </tr>
             <tr>
               <td style="padding:24px 26px 4px 26px;">
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
-                  <tr><td style="background:#f8fafc;padding:12px 20px;font-size:13px;font-weight:700;color:#0f172a;">Issues by severity</td></tr>
+                  <tr><td style="background:#f8fafc;padding:12px 20px;font-size:13px;font-weight:700;color:#0f172a;">Violations by severity (${totalIssues} total, grouped into ${ticketRows.length} ticket(s))</td></tr>
                   ${severityRows}
                 </table>
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:20px;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
@@ -253,6 +254,8 @@ export interface PostProcessEmailData {
   generatedAt: Date;
   resolvedCount: number;
   unresolvedCount: number;
+  resolvedIssueCount: number;
+  unresolvedIssueCount: number;
   tickets: PostProcessTicketRow[];
   prUrl: string | null;
   prNumber: number | null;
@@ -262,9 +265,9 @@ export interface PostProcessEmailData {
 }
 
 export function renderPostProcessEmailText(data: PostProcessEmailData): string {
-  const { cycleId, resolvedCount, unresolvedCount, tickets: ticketRows, prUrl, mergeStatus, testSummary, remainingBlockers } = data;
+  const { cycleId, resolvedCount, unresolvedCount, resolvedIssueCount, unresolvedIssueCount, tickets: ticketRows, prUrl, mergeStatus, testSummary, remainingBlockers } = data;
   return [
-    `Cycle ${cycleId} complete: ${resolvedCount} resolved, ${unresolvedCount} unresolved/failed.`,
+    `Cycle ${cycleId} complete: ${resolvedCount} ticket(s) resolved (${resolvedIssueCount} violation(s) fixed), ${unresolvedCount} ticket(s) unresolved (${unresolvedIssueCount} violation(s)).`,
     ``,
     `Tickets:`,
     ...ticketRows.map((t) => `  - ${t.jiraKey ?? t.id} [${t.status}]: ${t.category}`),
@@ -281,7 +284,7 @@ export function renderPostProcessEmailText(data: PostProcessEmailData): string {
 }
 
 export function renderPostProcessEmailHtml(data: PostProcessEmailData): string {
-  const { projectLabel, cycleId, generatedAt, resolvedCount, unresolvedCount, tickets: ticketRows, prUrl, prNumber, mergeStatus, testSummary, remainingBlockers } = data;
+  const { projectLabel, cycleId, generatedAt, resolvedCount, unresolvedCount, resolvedIssueCount, unresolvedIssueCount, tickets: ticketRows, prUrl, prNumber, mergeStatus, testSummary, remainingBlockers } = data;
   const dateStr = generatedAt.toLocaleString();
 
   const ticketRowsHtml = ticketRows
@@ -323,8 +326,8 @@ export function renderPostProcessEmailHtml(data: PostProcessEmailData): string {
               <td style="padding:24px 26px 0 26px;">
                 <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
                   <tr>
-                    ${renderStatCard(resolvedCount, "Resolved", "#16a34a")}
-                    ${renderStatCard(unresolvedCount, "Unresolved", "#dc2626")}
+                    ${renderStatCard(resolvedCount, "Tickets Resolved", "#16a34a", `${resolvedIssueCount} violation(s) fixed`)}
+                    ${renderStatCard(unresolvedCount, "Tickets Unresolved", "#dc2626", `${unresolvedIssueCount} violation(s) remaining`)}
                     ${renderStatCard(remainingBlockers.length, "Blockers", "#d97706")}
                   </tr>
                 </table>
