@@ -889,6 +889,7 @@ async function _runOrchestratorCycle(existingCycleId?: string, mode: CycleMode =
             },
             {
               configurable: { thread_id: cycle.id },
+              recursionLimit: 100,
               // Suppresses LangGraph's internal run tracing (_start_, ChannelWrite, node
               // wrapper runs) — the meaningful agent.* / anthropic.* runs attach directly
               // to the root "ForgeAI" run instead (see agent-tracing.ts).

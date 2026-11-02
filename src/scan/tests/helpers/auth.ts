@@ -14,7 +14,8 @@ export async function login(page: Page, role: Role) {
   await page.getByLabel("Work email").fill(email);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("heading", { level: 1, name: /Welcome back/ })).toBeVisible();
+  // Target backend is on Azure App Service; cold-start logins can exceed the default 5s.
+  await expect(page.getByRole("heading", { level: 1, name: /Welcome back/ })).toBeVisible({ timeout: 45_000 });
 }
 
 export async function gotoAuthed(page: Page) {
