@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { run } from "./exec.js";
+import { logger } from "./logger.js";
 
 export function assertTargetRepoConfigured(): string {
   const repoPath = process.env.TARGET_REPO_PATH?.trim();
@@ -45,7 +46,12 @@ export class GitNotSyncedError extends Error {
 
 /**
  * Confirms the target repo is safe to start a new cycle on: no uncommitted
- * changes, and the base branch is neither behind nor ahead of origin.
+ * changes, and the base branch is not ahead of origin. If the local branch is
+ * merely behind (the common case when a previous cycle or a teammate merged
+ * remotely since this checkout last fetched), it is fast-forwarded
+ * automatically instead of failing the cycle — that's a safe, lossless
+ * update, unlike "ahead" which means there are local commits that could be
+ * lost by rewriting the ref.
  */
 export async function assertRepoReadyForCycle(repoPath = assertTargetRepoConfigured()): Promise<void> {
   const { stdout: statusOut } = await run("git", ["status", "--porcelain"], repoPath);
@@ -75,6 +81,21 @@ export async function assertRepoReadyForCycle(repoPath = assertTargetRepoConfigu
   const [aheadStr, behindStr] = countsOut.trim().split(/\s+/);
   const ahead = parseInt(aheadStr ?? "0", 10);
   const behind = parseInt(behindStr ?? "0", 10);
-  if (behind > 0) throw new GitNotSyncedError(branch, "behind");
+
+  // Diverged or ahead both mean local commits exist that aren't on origin —
+  // fast-forwarding would discard them, so this still requires a human.
   if (ahead > 0) throw new GitNotSyncedError(branch, "ahead");
+
+  if (behind > 0) {
+    logger.warn("preflight", `Local "${branch}" is ${behind} commit(s) behind origin/${branch} — fast-forwarding before starting the cycle.`);
+    const { stdout: currentBranchOut } = await run("git", ["rev-parse", "--abbrev-ref", "HEAD"], repoPath);
+    if (currentBranchOut.trim() === branch) {
+      await run("git", ["merge", "--ff-only", `origin/${branch}`], repoPath);
+    } else {
+      // Branch isn't checked out — safe to move the ref directly without
+      // touching the working tree.
+      await run("git", ["fetch", "origin", `${branch}:${branch}`], repoPath);
+    }
+    logger.info("preflight", `"${branch}" is now up to date with origin/${branch}.`);
+  }
 }

@@ -54,14 +54,30 @@ describe("assertRepoReadyForCycle", () => {
     await expect(assertRepoReadyForCycle("C:/repo")).resolves.toBeUndefined();
   });
 
-  it("throws GitNotSyncedError when the local branch exists and is behind origin", async () => {
+  it("fast-forwards the checked-out local branch instead of failing when it is behind origin", async () => {
     runMock
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "qa", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "", stderr: "" })
-      .mockResolvedValueOnce({ stdout: "0\t2\n", stderr: "" }); // 0 ahead, 2 behind
-    const { assertRepoReadyForCycle, GitNotSyncedError } = await import("./repo-config.js");
-    await expect(assertRepoReadyForCycle("C:/repo")).rejects.toThrow(GitNotSyncedError);
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }) // status --porcelain
+      .mockResolvedValueOnce({ stdout: "qa", stderr: "" }) // rev-parse --verify (local branch exists)
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }) // fetch origin qa
+      .mockResolvedValueOnce({ stdout: "0\t2\n", stderr: "" }) // 0 ahead, 2 behind
+      .mockResolvedValueOnce({ stdout: "qa\n", stderr: "" }) // rev-parse --abbrev-ref HEAD
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }); // merge --ff-only
+    const { assertRepoReadyForCycle } = await import("./repo-config.js");
+    await expect(assertRepoReadyForCycle("C:/repo")).resolves.toBeUndefined();
+    expect(runMock).toHaveBeenCalledWith("git", ["merge", "--ff-only", "origin/qa"], "C:/repo");
+  });
+
+  it("updates the local branch ref directly when behind and not currently checked out", async () => {
+    runMock
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }) // status --porcelain
+      .mockResolvedValueOnce({ stdout: "qa", stderr: "" }) // rev-parse --verify (local branch exists)
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }) // fetch origin qa
+      .mockResolvedValueOnce({ stdout: "0\t2\n", stderr: "" }) // 0 ahead, 2 behind
+      .mockResolvedValueOnce({ stdout: "main\n", stderr: "" }) // rev-parse --abbrev-ref HEAD (on a different branch)
+      .mockResolvedValueOnce({ stdout: "", stderr: "" }); // fetch origin qa:qa
+    const { assertRepoReadyForCycle } = await import("./repo-config.js");
+    await expect(assertRepoReadyForCycle("C:/repo")).resolves.toBeUndefined();
+    expect(runMock).toHaveBeenCalledWith("git", ["fetch", "origin", "qa:qa"], "C:/repo");
   });
 
   it("throws GitNotSyncedError when the local branch exists and has unpushed commits ahead of origin", async () => {
