@@ -62,7 +62,7 @@ export function StageTimeline({
           const isLast = i === stages.length - 1;
 
           return (
-            <div key={stage} className="hpipeline__step">
+            <div key={stage} className="hpipeline__step" role="listitem">
               <StageNodeExpandable
                 stage={stage}
                 status={status}

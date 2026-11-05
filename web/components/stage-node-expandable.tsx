@@ -49,7 +49,6 @@ function getStatusIndicator(status: string): string {
 export function StageNodeExpandable({
   stage,
   status,
-  logs,
   compact,
   isExpanded,
   onToggle,
@@ -59,7 +58,6 @@ export function StageNodeExpandable({
       <button
         className={`hcard hcard--${status}${isExpanded ? " hcard--expanded" : ""}`}
         onClick={onToggle}
-        role="listitem"
         aria-expanded={isExpanded}
         aria-controls={`stage-logs-${stage}`}
       >

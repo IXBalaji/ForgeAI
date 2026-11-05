@@ -83,6 +83,7 @@ export function ConfirmationDialog({
           <fieldset className="mode-picker">
             <legend>Run depth</legend>
             {MODE_OPTIONS.map((option) => (
+              // eslint-disable-next-line jsx-a11y/label-has-associated-control -- input is nested; label text is {option.label} (rule can't see past depth 2)
               <label key={option.value} className="mode-option">
                 <input
                   type="radio"
